@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "FuelTrack"
+description = "A personal mobile-first food, protein, and spending tracker that works offline, stores data locally, and installs like an Android app."
+version = "1.0.0"
+id = "artifacts/fueltrack"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 22670
+
+[services.development]
+run = "pnpm --filter @workspace/fueltrack run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/fueltrack", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/fueltrack/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "22670"
+BASE_PATH = "/"
