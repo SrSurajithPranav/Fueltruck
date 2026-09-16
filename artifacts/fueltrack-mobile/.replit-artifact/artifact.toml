@@ -1,0 +1,24 @@
+kind = "mobile"
+previewPath = "/fueltrack-mobile/"
+title = "FuelTrack Mobile"
+description = "A native Android-first FuelTrack app for logging food, protein, spending, and grocery price history with offline local storage."
+version = "1.0.0"
+id = "artifacts/fueltrack-mobile"
+router = "expo-domain"
+
+[[services]]
+name = "expo"
+ensurePreviewReachable = "/status"
+paths = [ "/fueltrack-mobile/" ]
+localPort = 19405
+
+[services.development]
+run = "pnpm --filter @workspace/fueltrack-mobile run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/fueltrack-mobile", "run", "build" ]
+run = [ "pnpm", "--filter", "@workspace/fueltrack-mobile", "run", "serve" ]
+
+[services.env]
+PORT = "19405"
+BASE_PATH = "/fueltrack-mobile/"
