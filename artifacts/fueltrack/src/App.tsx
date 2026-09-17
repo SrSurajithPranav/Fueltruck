@@ -51,6 +51,7 @@ import {
   shiftIso,
   todayIso,
 } from '@/lib/storage';
+import { applyVoicePlan, parseVoicePlan, validateVoicePlan, type VoicePlan } from '@/lib/voice-actions';
 
 type Page = 'today' | 'stats' | 'purchases' | 'settings';
 type Toast = { message: string; tone?: 'good' | 'warn' };
@@ -82,7 +83,7 @@ function FuelTrackApp() {
   const [editingEntry, setEditingEntry] = useState<FoodEntry | null>(null);
   const [editingFood, setEditingFood] = useState<Food | null>(null);
   const [toast, setToast] = useState<Toast | null>(null);
-  const [voiceCommand, setVoiceCommand] = useState<VoiceCommand | null>(null);
+  const [voiceCommand, setVoiceCommand] = useState<VoicePlan | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const page: Page = location === '/stats' ? 'stats' : location === '/purchases' ? 'purchases' : location === '/settings' ? 'settings' : 'today';
@@ -172,6 +173,7 @@ function FuelTrackApp() {
             date={date}
             onAdd={() => setModal('entry')}
             onVoice={() => setModal('voice')}
+            onSuggestion={() => { setVoiceCommand(parseVoicePlan('What should I eat for dinner?', data)); setModal('voice'); }}
             onEdit={(entry) => { setEditingEntry(entry); setModal('entry'); }}
             onDelete={deleteEntry}
             onRepeat={() => duplicateDay(shiftIso(date, -1), date)}
@@ -201,28 +203,14 @@ function FuelTrackApp() {
         <EntryModal data={data} date={date} editing={editingEntry} onClose={closeModal} onSubmit={editingEntry ? updateEntry : addEntry} />
       )}
       {modal === 'purchase' && <PurchaseModal data={data} onClose={closeModal} onSubmit={addPurchase} />}
-      {modal === 'voice' && <VoiceModal data={data} initialCommand={voiceCommand} onClose={closeModal} onCommandChange={setVoiceCommand} onSubmit={(command) => {
-        let next = { ...data, foods: [...data.foods], dailyLogs: { ...data.dailyLogs }, purchases: [...data.purchases], inventory: { ...data.inventory } };
-        const ensureFood = (item: Food) => {
-          if (!next.foods.some((food) => food.id === item.id)) next.foods.push(item);
-          return next.foods.find((food) => food.id === item.id) ?? item;
-        };
-        if (command.kind === 'meal') {
-          const entries = command.items.map(({ food: sourceFood, quantity }) => {
-            const food = ensureFood(sourceFood);
-            return { id: crypto.randomUUID(), foodId: food.id, foodNameSnapshot: food.name, meal: command.meal, quantity, unit: food.servingUnit, protein: foodProtein(food, quantity), cost: foodCost(food, quantity), createdAt: new Date().toISOString() };
-          });
-          const log = next.dailyLogs[command.date] ?? { date: command.date, entries: [] };
-          next.dailyLogs[command.date] = { ...log, entries: [...log.entries, ...entries] };
-          updateData(next, `${entries.length} food${entries.length === 1 ? '' : 's'} added by voice`);
-        } else {
-          const food = ensureFood(command.food);
-          const purchase: Purchase = { id: crypto.randomUUID(), date: command.date, foodId: food.id, foodNameSnapshot: food.name, quantity: command.quantity, unit: food.priceUnit, brand: '', price: command.price };
-          next.purchases.unshift(purchase);
-          next.inventory[food.id] = (next.inventory[food.id] ?? 0) + command.quantity;
-          updateData(next, `${food.name} purchase recorded`);
+      {modal === 'voice' && <UniversalVoiceModal data={data} initialPlan={voiceCommand} onClose={closeModal} onPlanChange={setVoiceCommand} onSubmit={(plan) => {
+        try {
+          const result = applyVoicePlan(plan, data);
+          updateData(result.data, [...result.messages, ...result.queryResults].join(' · ') || 'Voice action complete');
+          closeModal();
+        } catch (error) {
+          notify(error instanceof Error ? error.message : 'That action needs more detail', 'warn');
         }
-        closeModal();
       }} />}
       {modal === 'food' && <FoodModal food={editingFood} onClose={closeModal} onSubmit={saveFood} />}
       {modal === 'import' && (
@@ -368,11 +356,43 @@ function VoiceModal({ data, initialCommand, onClose, onCommandChange, onSubmit }
   return <Modal title="Add by voice" onClose={onClose}><div className="rounded-2xl bg-secondary/45 p-4 text-sm leading-6 text-muted-foreground">Say what you ate, bought, or paid for. FuelTrack will turn it into a reviewable entry before saving.</div><div className="my-5 flex justify-center"><button data-testid="button-voice-listen" aria-label={listening ? 'Stop listening' : 'Start listening'} onClick={listening ? () => recognitionRef.current?.stop() : startListening} className={`grid h-20 w-20 place-items-center rounded-full shadow-float transition ${listening ? 'animate-pulse bg-accent text-accent-foreground' : 'bg-primary text-primary-foreground hover:scale-105'}`}>{listening ? <MicOff size={30} /> : <Mic size={30} />}</button></div><p className="mb-3 text-center text-xs font-semibold uppercase tracking-widest text-muted-foreground">{listening ? 'Listening…' : Recognition ? 'Tap to speak' : 'Voice unavailable — type instead'}</p><textarea data-testid="input-voice-transcript" value={transcript} onChange={(event) => parse(event.target.value)} placeholder='“I ate 5 dosa with curd for breakfast”' className="input min-h-24 resize-y py-3" />{error && <p className="mt-2 text-xs font-semibold text-destructive">{error}</p>}{command && <div className="mt-4 rounded-2xl border border-primary/20 bg-primary/5 p-4">{command.kind === 'meal' ? <><div className="flex items-center justify-between"><p className="text-sm font-bold">Meal · {command.meal}</p><span className="text-xs text-muted-foreground">{formatDay(command.date)}</span></div><div className="mt-3 space-y-2">{command.items.map((item) => <div key={`${item.food.id}-${item.quantity}`} className="flex items-center justify-between text-sm"><span>{quantityText(item.quantity)} × {item.food.name}</span>{item.isNew && <span className="rounded-full bg-accent/15 px-2 py-0.5 text-[10px] font-bold text-accent-foreground">new food</span>}</div>)}</div></> : <><div className="flex items-center justify-between"><p className="text-sm font-bold">Purchase</p><span className="text-xs text-muted-foreground">{formatDay(command.date)}</span></div><div className="mt-3 flex items-center justify-between text-sm"><span>{quantityText(command.quantity)} × {command.food.name}</span><span className="font-bold">{currency(command.price)}</span></div>{command.isNew && <p className="mt-2 text-xs font-semibold text-primary">This will create a custom food automatically.</p>}</>}</div>}{command && <button data-testid="button-confirm-voice" onClick={() => onSubmit(command)} className="mt-5 w-full rounded-2xl bg-primary px-4 py-3.5 font-bold text-primary-foreground">Confirm and save</button>}</Modal>;
 }
 
+function UniversalVoiceModal({ data, initialPlan, onClose, onPlanChange, onSubmit }: { data: AppData; initialPlan: VoicePlan | null; onClose: () => void; onPlanChange: (plan: VoicePlan | null) => void; onSubmit: (plan: VoicePlan) => void }) {
+  const [transcript, setTranscript] = useState(initialPlan?.transcript ?? '');
+  const [listening, setListening] = useState(false);
+  const [error, setError] = useState('');
+  const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const speechApi = typeof window !== 'undefined' ? window as typeof window & { SpeechRecognition?: new () => SpeechRecognitionLike; webkitSpeechRecognition?: new () => SpeechRecognitionLike } : null;
+  const Recognition = speechApi?.SpeechRecognition ?? speechApi?.webkitSpeechRecognition;
+  useEffect(() => () => recognitionRef.current?.stop(), []);
+  const parse = (value: string) => { setTranscript(value); onPlanChange(value.trim() ? parseVoicePlan(value, data) : null); };
+  const startListening = () => {
+    if (!Recognition) { setError('Voice recognition is unavailable in this browser. You can still type below.'); return; }
+    const recognition = new Recognition();
+    recognition.lang = 'en-IN'; recognition.continuous = false; recognition.interimResults = true;
+    recognition.onresult = (event) => parse(Array.from(event.results).map((result) => result[0]?.transcript ?? '').join(' '));
+    recognition.onend = () => setListening(false);
+    recognition.onerror = () => { setListening(false); setError('I could not hear that clearly. Try again or edit the text.'); };
+    recognitionRef.current = recognition; setError(''); setListening(true);
+    try { recognition.start(); } catch { setListening(false); setError('The microphone is already in use. Try again.'); }
+  };
+  const plan = transcript.trim() ? parseVoicePlan(transcript, data) : null;
+  const validationError = plan ? validateVoicePlan(plan) : null;
+  return <Modal title="Tell FuelTrack" onClose={onClose}>
+    <div className="rounded-2xl bg-secondary/45 p-4 text-sm leading-6 text-muted-foreground">Describe meals, purchases, targets, questions, or several actions in one sentence. Review it before anything is saved.</div>
+    <div className="my-5 flex justify-center"><button data-testid="button-voice-listen-universal" aria-label={listening ? 'Stop listening' : 'Start listening'} onClick={listening ? () => recognitionRef.current?.stop() : startListening} className={`grid h-20 w-20 place-items-center rounded-full shadow-float transition ${listening ? 'animate-pulse bg-accent text-accent-foreground' : 'bg-primary text-primary-foreground hover:scale-105'}`}>{listening ? <MicOff size={30} /> : <Mic size={30} />}</button></div>
+    <p className="mb-3 text-center text-xs font-semibold uppercase tracking-widest text-muted-foreground">{listening ? 'Listening...' : Recognition ? 'Tap to speak' : 'Voice unavailable - type instead'}</p>
+    <textarea data-testid="input-universal-voice" value={transcript} onChange={(event) => parse(event.target.value)} placeholder="I had 3 dosa and 100g tofu for breakfast, and bought milk for 22 rupees" className="input min-h-24 resize-y py-3" />
+    {error && <p className="mt-2 text-xs font-semibold text-destructive">{error}</p>}
+    {plan && <div className="mt-4 rounded-2xl border border-primary/20 bg-primary/5 p-4"><p className="text-sm font-bold">{plan.actions.length} action{plan.actions.length === 1 ? '' : 's'} detected</p><div className="mt-3 space-y-2 text-sm">{plan.actions.map((action, index) => <div key={`${action.type}-${index}`} className="flex items-center justify-between gap-3"><span>{action.type.replaceAll('_', ' ')}</span><span className="text-right text-xs text-muted-foreground">{action.type === 'ADD_MEAL' ? `${action.items.length} food${action.items.length === 1 ? '' : 's'} · ${action.meal}` : action.type === 'ADD_PURCHASE' ? action.food.name : action.type === 'SET_PROTEIN_TARGET' ? `${action.target} g` : ''}</span></div>)}</div>{(plan.clarification || validationError) && <p className="mt-3 text-xs font-semibold text-destructive">{validationError ?? plan.clarification}</p>}</div>}
+    {plan && !validationError && !plan.clarification && <button data-testid="button-confirm-universal-voice" onClick={() => onSubmit(plan)} className="mt-5 w-full rounded-2xl bg-primary px-4 py-3.5 font-bold text-primary-foreground">Review and save</button>}
+  </Modal>;
+}
+
 function PageHeading({ eyebrow, title, action }: { eyebrow: string; title: string; action?: ReactNode }) {
   return <div className="mb-8 flex items-end justify-between gap-4"><div><p className="mb-2 text-[11px] font-bold uppercase tracking-[.18em] text-primary">{eyebrow}</p><h1 className="font-display text-4xl font-bold tracking-tight sm:text-5xl">{title}</h1></div>{action}</div>;
 }
 
-function TodayPage({ data, date, onArrowDateChange, onPickerDateChange, onAdd, onVoice, onEdit, onDelete, onRepeat, onRepeatMeal, futureDateExplicit }: { data: AppData; date: string; onArrowDateChange: (date: string) => void; onPickerDateChange: (date: string) => void; onAdd: () => void; onVoice: () => void; onEdit: (entry: FoodEntry) => void; onDelete: (id: string) => void; onRepeat: () => void; onRepeatMeal: (meal: Meal) => void; futureDateExplicit: boolean }) {
+function TodayPage({ data, date, onArrowDateChange, onPickerDateChange, onAdd, onVoice, onSuggestion, onEdit, onDelete, onRepeat, onRepeatMeal, futureDateExplicit }: { data: AppData; date: string; onArrowDateChange: (date: string) => void; onPickerDateChange: (date: string) => void; onAdd: () => void; onVoice: () => void; onSuggestion: () => void; onEdit: (entry: FoodEntry) => void; onDelete: (id: string) => void; onRepeat: () => void; onRepeatMeal: (meal: Meal) => void; futureDateExplicit: boolean }) {
   const entries = data.dailyLogs[date]?.entries ?? [];
   const protein = entries.reduce((sum, entry) => sum + entry.protein, 0);
   const cost = entries.reduce((sum, entry) => sum + entry.cost, 0);
@@ -410,6 +430,7 @@ function TodayPage({ data, date, onArrowDateChange, onPickerDateChange, onAdd, o
         <button data-testid="button-add-food" disabled={!canLog} onClick={onAdd} className="flex items-center justify-center gap-2 rounded-2xl bg-accent px-4 py-3.5 text-sm font-bold text-accent-foreground shadow-sm transition hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-45"><Plus size={18} />Add food</button>
         <button data-testid="button-repeat-yesterday" disabled={!canLog} onClick={onRepeat} className="flex items-center justify-center gap-2 rounded-2xl border border-border bg-card px-4 py-3.5 text-sm font-bold transition hover:bg-secondary/60 disabled:cursor-not-allowed disabled:opacity-45"><RotateCcw size={17} />Repeat yesterday</button>
       </div>
+      <button data-testid="button-meal-suggestion" onClick={onSuggestion} className="mb-7 flex w-full items-center gap-3 rounded-2xl border border-accent/30 bg-accent/10 px-4 py-3.5 text-left transition hover:bg-accent/15"><span className="grid h-9 w-9 place-items-center rounded-xl bg-accent text-accent-foreground"><Leaf size={17} /></span><span className="min-w-0 flex-1"><span className="block text-sm font-bold">What should I eat?</span><span className="mt-0.5 block truncate text-xs text-muted-foreground">Get a practical suggestion for your remaining protein.</span></span><ArrowRight size={16} className="shrink-0 text-accent-foreground" /></button>
       <button data-testid="button-voice-entry" onClick={onVoice} className="mb-7 flex w-full items-center gap-3 rounded-2xl border border-primary/20 bg-primary/5 px-4 py-3.5 text-left transition hover:bg-primary/10"><span className="grid h-9 w-9 place-items-center rounded-xl bg-primary text-primary-foreground"><Mic size={17} /></span><span className="min-w-0 flex-1"><span className="block text-sm font-bold">Tell FuelTrack what happened</span><span className="mt-0.5 block truncate text-xs text-muted-foreground">“I ate 5 dosa with curd for breakfast” or “I bought rice for ₹120 yesterday”</span></span><ArrowRight size={16} className="shrink-0 text-primary" /></button>
       <div className="mb-7 flex items-center justify-between rounded-2xl bg-secondary/45 px-4 py-3"><div className="flex items-center gap-2"><Flame size={17} className="text-accent" /><span className="text-sm font-semibold">Daily logging streak</span></div><span className="font-display text-lg font-bold">{streak} {streak === 1 ? 'day' : 'days'}</span></div>
       <div className="space-y-6">
@@ -446,12 +467,23 @@ function StatsPage({ data }: { data: AppData }) {
   const categoriesSpend = data.foods.map((food) => ({ ...food, spend: logs.flatMap((log) => log.entries).filter((entry) => entry.foodId === food.id).reduce((sum, entry) => sum + entry.cost, 0) })).filter((food) => food.spend > 0).sort((a, b) => b.spend - a.spend);
   const monthPurchases = data.purchases.filter((purchase) => monthKey(purchase.date) === month).reduce((sum, purchase) => sum + purchase.price, 0);
   const projection = monthDate.getMonth() === new Date().getMonth() && monthDate.getFullYear() === new Date().getFullYear() ? totalSpend / Math.max(1, new Date().getDate()) * new Date(monthDate.getFullYear(), monthDate.getMonth() + 1, 0).getDate() : totalSpend;
-  return <div className="animate-rise"><PageHeading eyebrow="Patterns, not pressure" title="Stats" />
+  return <div className="animate-rise"><PageHeading eyebrow="Patterns, not pressure" title="Stats" /><ProteinSources data={data} logs={logs} />
     <div className="mb-7 flex items-center justify-between rounded-2xl border border-border/70 bg-card/70 p-2"><IconButton label="Previous month" onClick={() => setMonthDate(new Date(monthDate.getFullYear(), monthDate.getMonth() - 1, 1))}><ChevronLeft size={18} /></IconButton><span className="font-display text-lg font-bold">{monthLabel(monthDate)}</span><IconButton label="Next month" onClick={() => setMonthDate(new Date(monthDate.getFullYear(), monthDate.getMonth() + 1, 1))}><ChevronRight size={18} /></IconButton></div>
      <div className="grid grid-cols-2 gap-3 sm:grid-cols-5"><Metric label="Protein total" value={`${quantityText(totalProtein)} g`} icon={<Flame size={17} />} /><Metric label="Avg protein / day" value={`${quantityText(averageProtein)} g`} icon={<TrendingUp size={17} />} /><Metric label="Avg spend / day" value={currency(averageSpend)} icon={<IndianRupee size={17} />} /><Metric label="Target days" value={`${targetDays}/${daysInMonth}`} icon={<Check size={17} />} /><Metric label="Log days" value={`${activeDays}`} icon={<CalendarDays size={17} />} /></div>
     <section className="mt-7 rounded-[24px] border border-border/70 bg-card/70 p-5 sm:p-6"><div className="flex items-start justify-between gap-3"><div><p className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Spending rhythm</p><p className="mt-2 font-display text-3xl font-bold">{currency(totalSpend)}</p><p className="mt-1 text-sm text-muted-foreground">food logged this month</p></div><div className="rounded-xl bg-secondary/70 p-2.5 text-primary"><IndianRupee size={18} /></div></div><div className="mt-6 flex items-center justify-between text-sm"><span className="text-muted-foreground">Budget {currency(data.settings.monthlyBudget)}</span><span className="font-bold">{Math.round(data.settings.monthlyBudget ? totalSpend / data.settings.monthlyBudget * 100 : 0)}%</span></div><div className="mt-2 h-3 overflow-hidden rounded-full bg-secondary"><div className={`h-full rounded-full transition-all ${totalSpend > data.settings.monthlyBudget ? 'bg-destructive' : 'bg-accent'}`} style={{ width: `${Math.min(100, data.settings.monthlyBudget ? totalSpend / data.settings.monthlyBudget * 100 : 0)}%` }} /></div><div className="mt-4 grid grid-cols-2 gap-3 border-t border-border/60 pt-4 text-sm"><div><p className="text-xs text-muted-foreground">Month projection</p><p className="mt-1 font-bold">{currency(projection)}</p></div><div><p className="text-xs text-muted-foreground">Purchases paid</p><p className="mt-1 font-bold">{currency(monthPurchases)}</p></div></div></section>
     <section className="mt-7"><div className="mb-3 flex items-center justify-between"><h2 className="font-display text-xl font-bold">By category</h2><span className="text-xs text-muted-foreground">{categoriesSpend.length ? `${categoriesSpend.length} categories` : 'No spend yet'}</span></div>{categoriesSpend.length ? <div className="space-y-2">{categoriesSpend.map((item, index) => <div key={item.id} className="flex items-center gap-3 rounded-2xl border border-border/60 bg-card/60 p-3.5"><span className={`grid h-9 w-9 place-items-center rounded-xl ${index === 0 ? 'bg-accent/20 text-accent-foreground' : 'bg-secondary text-primary'}`}><Package size={17} /></span><div className="min-w-0 flex-1"><div className="flex justify-between gap-2 text-sm"><span className="truncate font-semibold">{item.name}</span><span className="font-bold">{currency(item.spend)}</span></div><div className="mt-2 h-1.5 overflow-hidden rounded-full bg-secondary"><div className="h-full rounded-full bg-primary/70" style={{ width: `${totalSpend ? item.spend / totalSpend * 100 : 0}%` }} /></div></div></div>)}</div> : <EmptyState icon={<TrendingUp size={22} />} title="Your month is still quiet" body="Log a few meals and your spending rhythm will appear here." />}</section>
   </div>;
+}
+
+function ProteinSources({ data, logs }: { data: AppData; logs: Array<{ entries: FoodEntry[] }> }) {
+  const totals = logs.flatMap((log) => log.entries).reduce<Record<string, number>>((result, entry) => {
+    const category = data.foods.find((food) => food.id === entry.foodId)?.category ?? 'Other';
+    result[category] = (result[category] ?? 0) + entry.protein;
+    return result;
+  }, {});
+  const total = Object.values(totals).reduce((sum, value) => sum + value, 0);
+  const sources = Object.entries(totals).filter(([, value]) => value > 0).sort(([, a], [, b]) => b - a);
+  return <section className="mb-7 rounded-[24px] border border-border/70 bg-card/70 p-5 sm:p-6"><div className="flex items-start justify-between gap-3"><div><p className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Where it comes from</p><h2 className="mt-2 font-display text-2xl font-bold">Protein sources</h2><p className="mt-1 text-sm text-muted-foreground">This month, from foods you logged.</p></div><Leaf size={21} className="text-primary" /></div>{sources.length ? <div className="mt-5 space-y-3">{sources.map(([name, value]) => <div key={name}><div className="flex justify-between gap-3 text-sm"><span className="font-semibold">{name}</span><span className="font-bold">{quantityText(value)} g · {Math.round(value / total * 100)}%</span></div><div className="mt-1.5 h-2 overflow-hidden rounded-full bg-secondary"><div className="h-full rounded-full bg-primary" style={{ width: `${total ? value / total * 100 : 0}%` }} /></div></div>)}</div> : <p className="mt-5 rounded-2xl bg-secondary/45 p-4 text-sm text-muted-foreground">Log foods with protein values to see the breakdown.</p>}</section>;
 }
 
 function PurchasesPage({ data, onAdd }: { data: AppData; onAdd: () => void }) {
