@@ -33,7 +33,7 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile --allow-build=esbuild
+        run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Build FuelTrack
         run: pnpm --filter @workspace/fueltrack run build
