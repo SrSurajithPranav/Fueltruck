@@ -16,9 +16,12 @@ import {
   FolderOpen,
   IndianRupee,
   Leaf,
+  Mic,
+  MicOff,
   Moon,
   MoreHorizontal,
   Package,
+  PackageOpen,
   Plus,
   RotateCcw,
   Settings as SettingsIcon,
@@ -51,6 +54,21 @@ import {
 
 type Page = 'today' | 'stats' | 'purchases' | 'settings';
 type Toast = { message: string; tone?: 'good' | 'warn' };
+type VoiceMealItem = { food: Food; quantity: number; isNew: boolean };
+type VoiceCommand =
+  | { kind: 'meal'; transcript: string; date: string; meal: Meal; items: VoiceMealItem[] }
+  | { kind: 'purchase'; transcript: string; date: string; food: Food; quantity: number; price: number; isNew: boolean };
+
+type SpeechRecognitionLike = {
+  lang: string;
+  continuous: boolean;
+  interimResults: boolean;
+  onresult: ((event: { results: ArrayLike<ArrayLike<{ transcript: string }>> }) => void) | null;
+  onend: (() => void) | null;
+  onerror: (() => void) | null;
+  start: () => void;
+  stop: () => void;
+};
 
 const meals: Meal[] = ['Breakfast', 'Lunch', 'Evening', 'Dinner', 'Snack', 'Other'];
 const categories: FoodCategory[] = ['Dairy', 'Eggs', 'Protein', 'Grains', 'Fruits & vegetables', 'Other'];
@@ -60,10 +78,11 @@ function FuelTrackApp() {
   const [location, setLocation] = useLocation();
   const [date, setDate] = useState(todayIso());
   const [futureDateExplicit, setFutureDateExplicit] = useState(false);
-  const [modal, setModal] = useState<'entry' | 'purchase' | 'food' | 'import' | 'clear' | null>(null);
+  const [modal, setModal] = useState<'entry' | 'purchase' | 'food' | 'import' | 'clear' | 'voice' | null>(null);
   const [editingEntry, setEditingEntry] = useState<FoodEntry | null>(null);
   const [editingFood, setEditingFood] = useState<Food | null>(null);
   const [toast, setToast] = useState<Toast | null>(null);
+  const [voiceCommand, setVoiceCommand] = useState<VoiceCommand | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const page: Page = location === '/stats' ? 'stats' : location === '/purchases' ? 'purchases' : location === '/settings' ? 'settings' : 'today';
@@ -81,7 +100,7 @@ function FuelTrackApp() {
     document.documentElement.classList.toggle('dark', data.settings.darkMode);
   }, [data.settings.darkMode]);
 
-  const closeModal = () => { setModal(null); setEditingEntry(null); setEditingFood(null); };
+  const closeModal = () => { setModal(null); setEditingEntry(null); setEditingFood(null); setVoiceCommand(null); };
   const navigate = (next: Page) => setLocation(next === 'today' ? '/' : `/${next}`);
 
   const addEntry = (entry: FoodEntry) => {
@@ -108,7 +127,7 @@ function FuelTrackApp() {
     updateData({ ...data, dailyLogs: { ...data.dailyLogs, [targetDate]: { date: targetDate, entries: [...current.entries, ...copied] } } }, meal ? `${meal} repeated` : 'Yesterday repeated');
   };
   const addPurchase = (purchase: Purchase) => {
-    updateData({ ...data, purchases: [purchase, ...data.purchases] }, 'Purchase recorded');
+    updateData({ ...data, purchases: [purchase, ...data.purchases], inventory: { ...data.inventory, [purchase.foodId]: (data.inventory[purchase.foodId] ?? 0) + purchase.quantity } }, 'Purchase recorded');
     closeModal();
   };
   const saveFood = (food: Food) => {
@@ -136,7 +155,7 @@ function FuelTrackApp() {
       try {
         const parsed = JSON.parse(String(reader.result)) as Partial<AppData>;
         if (!Array.isArray(parsed.foods) || !parsed.dailyLogs || !Array.isArray(parsed.purchases) || !parsed.settings) throw new Error('Invalid');
-        const imported: AppData = { foods: parsed.foods, dailyLogs: parsed.dailyLogs, purchases: parsed.purchases, settings: { proteinTarget: Number(parsed.settings.proteinTarget) || 80, monthlyBudget: Number(parsed.settings.monthlyBudget) || 4000, darkMode: parsed.settings.darkMode === true } };
+        const imported: AppData = { foods: parsed.foods, dailyLogs: parsed.dailyLogs, purchases: parsed.purchases, inventory: parsed.inventory ?? {}, settings: { proteinTarget: Number(parsed.settings.proteinTarget) || 80, monthlyBudget: Number(parsed.settings.monthlyBudget) || 4000, darkMode: parsed.settings.darkMode === true } };
         updateData(imported, 'Backup restored');
         setModal(null);
       } catch { notify('That file is not a FuelTrack backup', 'warn'); }
@@ -152,6 +171,7 @@ function FuelTrackApp() {
             data={data}
             date={date}
             onAdd={() => setModal('entry')}
+            onVoice={() => setModal('voice')}
             onEdit={(entry) => { setEditingEntry(entry); setModal('entry'); }}
             onDelete={deleteEntry}
             onRepeat={() => duplicateDay(shiftIso(date, -1), date)}
@@ -181,6 +201,29 @@ function FuelTrackApp() {
         <EntryModal data={data} date={date} editing={editingEntry} onClose={closeModal} onSubmit={editingEntry ? updateEntry : addEntry} />
       )}
       {modal === 'purchase' && <PurchaseModal data={data} onClose={closeModal} onSubmit={addPurchase} />}
+      {modal === 'voice' && <VoiceModal data={data} initialCommand={voiceCommand} onClose={closeModal} onCommandChange={setVoiceCommand} onSubmit={(command) => {
+        let next = { ...data, foods: [...data.foods], dailyLogs: { ...data.dailyLogs }, purchases: [...data.purchases], inventory: { ...data.inventory } };
+        const ensureFood = (item: Food) => {
+          if (!next.foods.some((food) => food.id === item.id)) next.foods.push(item);
+          return next.foods.find((food) => food.id === item.id) ?? item;
+        };
+        if (command.kind === 'meal') {
+          const entries = command.items.map(({ food: sourceFood, quantity }) => {
+            const food = ensureFood(sourceFood);
+            return { id: crypto.randomUUID(), foodId: food.id, foodNameSnapshot: food.name, meal: command.meal, quantity, unit: food.servingUnit, protein: foodProtein(food, quantity), cost: foodCost(food, quantity), createdAt: new Date().toISOString() };
+          });
+          const log = next.dailyLogs[command.date] ?? { date: command.date, entries: [] };
+          next.dailyLogs[command.date] = { ...log, entries: [...log.entries, ...entries] };
+          updateData(next, `${entries.length} food${entries.length === 1 ? '' : 's'} added by voice`);
+        } else {
+          const food = ensureFood(command.food);
+          const purchase: Purchase = { id: crypto.randomUUID(), date: command.date, foodId: food.id, foodNameSnapshot: food.name, quantity: command.quantity, unit: food.priceUnit, brand: '', price: command.price };
+          next.purchases.unshift(purchase);
+          next.inventory[food.id] = (next.inventory[food.id] ?? 0) + command.quantity;
+          updateData(next, `${food.name} purchase recorded`);
+        }
+        closeModal();
+      }} />}
       {modal === 'food' && <FoodModal food={editingFood} onClose={closeModal} onSubmit={saveFood} />}
       {modal === 'import' && (
         <Modal title="Restore a backup" onClose={closeModal}>
@@ -196,7 +239,7 @@ function FuelTrackApp() {
           <p className="text-sm leading-6 text-muted-foreground">This removes food logs, purchases, and your food library from this browser. It cannot be undone.</p>
           <div className="mt-6 flex gap-3">
             <button data-testid="button-cancel-clear" className="flex-1 rounded-2xl border border-border px-4 py-3 font-semibold" onClick={closeModal}>Keep data</button>
-            <button data-testid="button-confirm-clear" className="flex-1 rounded-2xl bg-destructive px-4 py-3 font-semibold text-destructive-foreground" onClick={() => { updateData({ foods: [], dailyLogs: {}, purchases: [], settings: { proteinTarget: 80, monthlyBudget: 4000, darkMode: data.settings.darkMode } }); closeModal(); notify('Data cleared'); }}>Clear data</button>
+            <button data-testid="button-confirm-clear" className="flex-1 rounded-2xl bg-destructive px-4 py-3 font-semibold text-destructive-foreground" onClick={() => { updateData({ foods: [], dailyLogs: {}, purchases: [], inventory: {}, settings: { proteinTarget: 80, monthlyBudget: 4000, darkMode: data.settings.darkMode } }); closeModal(); notify('Data cleared'); }}>Clear data</button>
           </div>
         </Modal>
       )}
@@ -249,11 +292,87 @@ function NavItem({ active, label, icon, onClick }: { active: boolean; label: str
   return <button data-testid={`nav-side-${label.toLowerCase()}`} onClick={onClick} className={`flex w-full items-center gap-3 rounded-xl px-3.5 py-3 text-sm font-semibold transition ${active ? 'bg-primary text-primary-foreground shadow-sm' : 'text-muted-foreground hover:bg-secondary/70 hover:text-foreground'}`}>{icon}<span>{label}</span></button>;
 }
 
+function normaliseVoiceText(value: string) {
+  return value.toLowerCase().replace(/[₹,]/g, '').replace(/\s+/g, ' ').trim();
+}
+
+function customFoodFromVoice(name: string): Food {
+  const cleanName = name.replace(/\b(today|yesterday|this morning|tonight)\b/gi, '').replace(/^(some|a|an|the)\s+/i, '').trim();
+  const slug = cleanName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'custom-food';
+  return { id: `voice-${slug}-${Date.now()}`, name: cleanName || 'Voice-added food', category: 'Other', servingLabel: '1 portion', servingQuantity: 1, servingUnit: 'portion', proteinPerServing: 0, defaultPrice: 0, priceQuantity: 1, priceUnit: 'portion', manualCost: true, proteinOptional: true };
+}
+
+function mentionedFood(text: string, foods: Food[]) {
+  return foods.flatMap((food) => food.name.split('/').map((term) => ({ food, term: term.trim().toLowerCase() }))).sort((a, b) => b.term.length - a.term.length).find(({ term }) => term && text.includes(term));
+}
+
+function inferVoiceMeal(text: string): Meal {
+  if (/\bbreakfast\b/.test(text)) return 'Breakfast';
+  if (/\blunch\b/.test(text)) return 'Lunch';
+  if (/\bevening|tea time\b/.test(text)) return 'Evening';
+  if (/\bdinner\b/.test(text)) return 'Dinner';
+  if (/\bsnack\b/.test(text)) return 'Snack';
+  const hour = new Date().getHours();
+  return hour < 11 ? 'Breakfast' : hour < 16 ? 'Lunch' : hour < 19 ? 'Evening' : 'Dinner';
+}
+
+function parseVoiceCommand(transcript: string, data: AppData): VoiceCommand | null {
+  const text = normaliseVoiceText(transcript);
+  if (!text) return null;
+  const date = /\byesterday\b/.test(text) ? shiftIso(todayIso(), -1) : todayIso();
+  const purchaseMatch = text.match(/\b(bought|buy|purchased|purchase|got)\b/);
+  if (purchaseMatch) {
+    const priceMatch = text.match(/\b(?:for|at|cost(?:ing)?|paid)\s*(?:rs\.?|inr|rupees?)?\s*(\d+(?:\.\d+)?)/);
+    const verbEnd = (purchaseMatch.index ?? 0) + purchaseMatch[0].length;
+    let itemText = text.slice(verbEnd).split(/\b(?:for|at|cost|paid)\b/)[0].replace(/\b(today|yesterday)\b/g, '').trim();
+    const quantityMatch = itemText.match(/^(\d+(?:\.\d+)?)\s+/);
+    const quantity = quantityMatch ? Math.max(0.01, Number(quantityMatch[1])) : 1;
+    if (quantityMatch) itemText = itemText.slice(quantityMatch[0].length).trim();
+    const known = mentionedFood(itemText, data.foods);
+    return { kind: 'purchase', transcript, date, food: known?.food ?? customFoodFromVoice(itemText), quantity, price: priceMatch ? Math.max(0, Number(priceMatch[1])) : 0, isNew: !known };
+  }
+  const meal = inferVoiceMeal(text);
+  const itemText = text.replace(/^.*?\b(ate|eat|had|have|consumed|finished)\b/, '').replace(/\bfor\s+(breakfast|lunch|evening|dinner|snack)\b/g, '').replace(/\b(today|yesterday)\b/g, '').trim();
+  if (!itemText) return null;
+  const parts = itemText.split(/\s*(?:with|and|,|\+)\s*/).map((part) => part.trim()).filter(Boolean);
+  const items = parts.map((part) => {
+    const quantityMatch = part.match(/^(\d+(?:\.\d+)?)\s+/);
+    const quantity = quantityMatch ? Math.max(0.01, Number(quantityMatch[1])) : 1;
+    const namedText = quantityMatch ? part.slice(quantityMatch[0].length).trim() : part;
+    const known = mentionedFood(namedText, data.foods);
+    return { food: known?.food ?? customFoodFromVoice(namedText), quantity, isNew: !known };
+  }).filter((item) => item.food.name.length > 0);
+  return items.length ? { kind: 'meal', transcript, date, meal, items } : null;
+}
+
+function VoiceModal({ data, initialCommand, onClose, onCommandChange, onSubmit }: { data: AppData; initialCommand: VoiceCommand | null; onClose: () => void; onCommandChange: (command: VoiceCommand | null) => void; onSubmit: (command: VoiceCommand) => void }) {
+  const [transcript, setTranscript] = useState(initialCommand?.transcript ?? '');
+  const [listening, setListening] = useState(false);
+  const [error, setError] = useState('');
+  const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const speechApi = typeof window !== 'undefined' ? window as typeof window & { SpeechRecognition?: new () => SpeechRecognitionLike; webkitSpeechRecognition?: new () => SpeechRecognitionLike } : null;
+  const Recognition = speechApi?.SpeechRecognition ?? speechApi?.webkitSpeechRecognition;
+  useEffect(() => () => recognitionRef.current?.stop(), []);
+  const parse = (value: string) => { setTranscript(value); onCommandChange(parseVoiceCommand(value, data)); };
+  const startListening = () => {
+    if (!Recognition) { setError('Voice recognition is unavailable in this browser. You can still type the sentence below.'); return; }
+    const recognition = new Recognition();
+    recognition.lang = 'en-IN'; recognition.continuous = false; recognition.interimResults = true;
+    recognition.onresult = (event) => parse(Array.from(event.results).map((result) => result[0]?.transcript ?? '').join(' '));
+    recognition.onend = () => setListening(false);
+    recognition.onerror = () => { setListening(false); setError('I could not hear that clearly. Try again or edit the text.'); };
+    recognitionRef.current = recognition; setError(''); setListening(true);
+    try { recognition.start(); } catch { setListening(false); setError('The microphone is already in use. Try again.'); }
+  };
+  const command = parseVoiceCommand(transcript, data);
+  return <Modal title="Add by voice" onClose={onClose}><div className="rounded-2xl bg-secondary/45 p-4 text-sm leading-6 text-muted-foreground">Say what you ate, bought, or paid for. FuelTrack will turn it into a reviewable entry before saving.</div><div className="my-5 flex justify-center"><button data-testid="button-voice-listen" aria-label={listening ? 'Stop listening' : 'Start listening'} onClick={listening ? () => recognitionRef.current?.stop() : startListening} className={`grid h-20 w-20 place-items-center rounded-full shadow-float transition ${listening ? 'animate-pulse bg-accent text-accent-foreground' : 'bg-primary text-primary-foreground hover:scale-105'}`}>{listening ? <MicOff size={30} /> : <Mic size={30} />}</button></div><p className="mb-3 text-center text-xs font-semibold uppercase tracking-widest text-muted-foreground">{listening ? 'Listening…' : Recognition ? 'Tap to speak' : 'Voice unavailable — type instead'}</p><textarea data-testid="input-voice-transcript" value={transcript} onChange={(event) => parse(event.target.value)} placeholder='“I ate 5 dosa with curd for breakfast”' className="input min-h-24 resize-y py-3" />{error && <p className="mt-2 text-xs font-semibold text-destructive">{error}</p>}{command && <div className="mt-4 rounded-2xl border border-primary/20 bg-primary/5 p-4">{command.kind === 'meal' ? <><div className="flex items-center justify-between"><p className="text-sm font-bold">Meal · {command.meal}</p><span className="text-xs text-muted-foreground">{formatDay(command.date)}</span></div><div className="mt-3 space-y-2">{command.items.map((item) => <div key={`${item.food.id}-${item.quantity}`} className="flex items-center justify-between text-sm"><span>{quantityText(item.quantity)} × {item.food.name}</span>{item.isNew && <span className="rounded-full bg-accent/15 px-2 py-0.5 text-[10px] font-bold text-accent-foreground">new food</span>}</div>)}</div></> : <><div className="flex items-center justify-between"><p className="text-sm font-bold">Purchase</p><span className="text-xs text-muted-foreground">{formatDay(command.date)}</span></div><div className="mt-3 flex items-center justify-between text-sm"><span>{quantityText(command.quantity)} × {command.food.name}</span><span className="font-bold">{currency(command.price)}</span></div>{command.isNew && <p className="mt-2 text-xs font-semibold text-primary">This will create a custom food automatically.</p>}</>}</div>}{command && <button data-testid="button-confirm-voice" onClick={() => onSubmit(command)} className="mt-5 w-full rounded-2xl bg-primary px-4 py-3.5 font-bold text-primary-foreground">Confirm and save</button>}</Modal>;
+}
+
 function PageHeading({ eyebrow, title, action }: { eyebrow: string; title: string; action?: ReactNode }) {
   return <div className="mb-8 flex items-end justify-between gap-4"><div><p className="mb-2 text-[11px] font-bold uppercase tracking-[.18em] text-primary">{eyebrow}</p><h1 className="font-display text-4xl font-bold tracking-tight sm:text-5xl">{title}</h1></div>{action}</div>;
 }
 
-function TodayPage({ data, date, onArrowDateChange, onPickerDateChange, onAdd, onEdit, onDelete, onRepeat, onRepeatMeal, futureDateExplicit }: { data: AppData; date: string; onArrowDateChange: (date: string) => void; onPickerDateChange: (date: string) => void; onAdd: () => void; onEdit: (entry: FoodEntry) => void; onDelete: (id: string) => void; onRepeat: () => void; onRepeatMeal: (meal: Meal) => void; futureDateExplicit: boolean }) {
+function TodayPage({ data, date, onArrowDateChange, onPickerDateChange, onAdd, onVoice, onEdit, onDelete, onRepeat, onRepeatMeal, futureDateExplicit }: { data: AppData; date: string; onArrowDateChange: (date: string) => void; onPickerDateChange: (date: string) => void; onAdd: () => void; onVoice: () => void; onEdit: (entry: FoodEntry) => void; onDelete: (id: string) => void; onRepeat: () => void; onRepeatMeal: (meal: Meal) => void; futureDateExplicit: boolean }) {
   const entries = data.dailyLogs[date]?.entries ?? [];
   const protein = entries.reduce((sum, entry) => sum + entry.protein, 0);
   const cost = entries.reduce((sum, entry) => sum + entry.cost, 0);
@@ -262,9 +381,12 @@ function TodayPage({ data, date, onArrowDateChange, onPickerDateChange, onAdd, o
   const isToday = date === todayIso();
   const isFuture = date > todayIso();
   const canLog = !isFuture || futureDateExplicit;
+  let streak = 0;
+  let streakDate = todayIso();
+  while (data.dailyLogs[streakDate]?.entries.length) { streak += 1; streakDate = shiftIso(streakDate, -1); }
   return (
     <div className="animate-rise">
-      <PageHeading eyebrow={isToday ? 'Your daily fuel' : 'Looking back'} title={isToday ? 'Today' : formatDay(date, { weekday: 'long', day: 'numeric', month: 'short' })} action={<button data-testid="button-add-entry-header" disabled={!canLog} onClick={onAdd} className="grid h-11 w-11 place-items-center rounded-2xl bg-accent text-accent-foreground shadow-sm transition hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-45"><Plus size={21} /></button>} />
+      <PageHeading eyebrow={isToday ? 'Your daily fuel' : 'Looking back'} title={isToday ? 'Today' : formatDay(date, { weekday: 'long', day: 'numeric', month: 'short' })} action={<div className="flex gap-2"><button data-testid="button-voice-entry-header" aria-label="Add by voice" title="Add by voice" onClick={onVoice} className="grid h-11 w-11 place-items-center rounded-2xl border border-primary/30 bg-primary/10 text-primary shadow-sm transition hover:-translate-y-0.5"><Mic size={20} /></button><button data-testid="button-add-entry-header" disabled={!canLog} onClick={onAdd} className="grid h-11 w-11 place-items-center rounded-2xl bg-accent text-accent-foreground shadow-sm transition hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-45"><Plus size={21} /></button></div>} />
       <div className="mb-6 flex items-center justify-between rounded-2xl border border-border/70 bg-card/70 p-2">
         <IconButton label="Previous day" onClick={() => onArrowDateChange(shiftIso(date, -1))}><ChevronLeft size={19} /></IconButton>
         <label data-testid="button-date-picker" className="flex cursor-pointer items-center gap-2 rounded-xl px-3 py-2 text-sm font-semibold"><CalendarDays size={16} className="text-primary" /><span>{isToday ? 'Today' : formatDay(date)}</span><input data-testid="input-selected-date" type="date" value={date} onChange={(event) => onPickerDateChange(event.target.value)} className="absolute h-0 w-0 opacity-0" /></label>
@@ -288,6 +410,8 @@ function TodayPage({ data, date, onArrowDateChange, onPickerDateChange, onAdd, o
         <button data-testid="button-add-food" disabled={!canLog} onClick={onAdd} className="flex items-center justify-center gap-2 rounded-2xl bg-accent px-4 py-3.5 text-sm font-bold text-accent-foreground shadow-sm transition hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-45"><Plus size={18} />Add food</button>
         <button data-testid="button-repeat-yesterday" disabled={!canLog} onClick={onRepeat} className="flex items-center justify-center gap-2 rounded-2xl border border-border bg-card px-4 py-3.5 text-sm font-bold transition hover:bg-secondary/60 disabled:cursor-not-allowed disabled:opacity-45"><RotateCcw size={17} />Repeat yesterday</button>
       </div>
+      <button data-testid="button-voice-entry" onClick={onVoice} className="mb-7 flex w-full items-center gap-3 rounded-2xl border border-primary/20 bg-primary/5 px-4 py-3.5 text-left transition hover:bg-primary/10"><span className="grid h-9 w-9 place-items-center rounded-xl bg-primary text-primary-foreground"><Mic size={17} /></span><span className="min-w-0 flex-1"><span className="block text-sm font-bold">Tell FuelTrack what happened</span><span className="mt-0.5 block truncate text-xs text-muted-foreground">“I ate 5 dosa with curd for breakfast” or “I bought rice for ₹120 yesterday”</span></span><ArrowRight size={16} className="shrink-0 text-primary" /></button>
+      <div className="mb-7 flex items-center justify-between rounded-2xl bg-secondary/45 px-4 py-3"><div className="flex items-center gap-2"><Flame size={17} className="text-accent" /><span className="text-sm font-semibold">Daily logging streak</span></div><span className="font-display text-lg font-bold">{streak} {streak === 1 ? 'day' : 'days'}</span></div>
       <div className="space-y-6">
         {meals.map((meal) => {
           const mealEntries = entries.filter((entry) => entry.meal === meal);
@@ -353,7 +477,8 @@ function SettingsPage({ data, onDataChange, onEditFood, onAddFood, onDeleteFood,
     <form onSubmit={saveSettings} className="rounded-[24px] border border-border/70 bg-card/70 p-5 sm:p-6"><div className="mb-5 flex items-center justify-between"><div><h2 className="font-display text-xl font-bold">Daily preferences</h2><p className="mt-1 text-sm text-muted-foreground">Small numbers that keep the ritual useful.</p></div><SettingsIcon size={21} className="text-primary" /></div><div className="grid gap-4 sm:grid-cols-2"><Field label="Protein target" hint="grams per day"><div className="relative"><input data-testid="input-protein-target" type="number" min="1" step="0.5" value={target} onChange={(e) => setTarget(e.target.value)} className="input pr-12" /><span className="input-suffix">g</span></div></Field><Field label="Monthly food budget" hint="your planned ceiling"><div className="relative"><span className="input-prefix">₹</span><input data-testid="input-monthly-budget" type="number" min="0" step="50" value={budget} onChange={(e) => setBudget(e.target.value)} className="input pl-8" /></div></Field></div><button data-testid="button-save-settings" type="submit" className="mt-5 rounded-xl bg-primary px-4 py-2.5 text-sm font-bold text-primary-foreground">Save preferences</button></form>
     <section className="mt-7 rounded-[24px] border border-border/70 bg-card/70 p-5 sm:p-6"><div className="flex items-center justify-between"><div><h2 className="font-display text-xl font-bold">Appearance</h2><p className="mt-1 text-sm text-muted-foreground">{data.settings.darkMode ? 'A softer evening palette.' : 'A warm, daylight palette.'}</p></div><button data-testid="button-toggle-dark-mode" onClick={toggleDark} className={`relative h-8 w-14 rounded-full p-1 transition ${data.settings.darkMode ? 'bg-primary' : 'bg-secondary'}`} aria-label="Toggle dark mode"><span className={`block h-6 w-6 rounded-full bg-card shadow-sm transition-transform ${data.settings.darkMode ? 'translate-x-6' : ''}`}>{data.settings.darkMode ? <Moon size={13} className="mx-auto mt-1.5 text-primary" /> : <Sun size={13} className="mx-auto mt-1.5 text-accent" />}</span></button></div></section>
     <section className="mt-7"><div className="mb-3 flex items-end justify-between"><div><p className="text-[11px] font-bold uppercase tracking-widest text-primary">Reference shelf</p><h2 className="mt-1 font-display text-2xl font-bold">Food database</h2></div><button data-testid="button-add-food-setting" onClick={onAddFood} className="flex items-center gap-1.5 text-sm font-bold text-primary"><Plus size={16} />Add food</button></div><div className="overflow-hidden rounded-2xl border border-border/70 bg-card/70">{data.foods.map((food) => <div key={food.id} data-testid={`row-food-${food.id}`} className="flex items-center justify-between gap-3 border-b border-border/50 px-4 py-3.5 last:border-0"><div className="min-w-0"><p className="truncate text-sm font-semibold">{food.name}</p><p className="mt-0.5 text-xs text-muted-foreground">{food.servingLabel} · {food.proteinOptional ? 'protein optional' : `${quantityText(food.proteinPerServing)} g protein`} · {food.manualCost ? 'manual cost' : `${currency(food.defaultPrice)} / ${food.priceUnit}`}</p></div><div className="flex shrink-0 gap-1"><IconButton label={`Edit ${food.name}`} onClick={() => onEditFood(food)}><Edit3 size={15} /></IconButton><IconButton label={`Delete ${food.name}`} onClick={() => onDeleteFood(food.id)}><Trash2 size={15} /></IconButton></div></div>)}</div></section>
-    <section className="mt-7 rounded-[24px] border border-border/70 bg-card/70 p-5 sm:p-6"><h2 className="font-display text-xl font-bold">Your data</h2><p className="mt-1 text-sm text-muted-foreground">Keep a copy, move devices, or start over.</p><div className="mt-5 grid gap-2 sm:grid-cols-3"><button data-testid="button-export-data" onClick={onExport} className="flex items-center justify-center gap-2 rounded-xl border border-border px-3 py-3 text-sm font-bold hover:bg-secondary/60"><Download size={16} />Export</button><button data-testid="button-import-data" onClick={onImport} className="flex items-center justify-center gap-2 rounded-xl border border-border px-3 py-3 text-sm font-bold hover:bg-secondary/60"><Upload size={16} />Import</button><button data-testid="button-clear-data" onClick={onClear} className="flex items-center justify-center gap-2 rounded-xl border border-destructive/30 px-3 py-3 text-sm font-bold text-destructive hover:bg-destructive/10"><Trash2 size={16} />Clear data</button></div></section>
+     <section className="mt-7 rounded-[24px] border border-border/70 bg-card/70 p-5 sm:p-6"><div className="flex items-start justify-between gap-3"><div><p className="text-[11px] font-bold uppercase tracking-widest text-primary">Worth knowing</p><h2 className="mt-1 font-display text-xl font-bold">Pantry stock</h2><p className="mt-1 text-sm text-muted-foreground">Track what is already at home. Purchases add to stock automatically.</p></div><PackageOpen size={21} className="text-primary" /></div><div className="mt-5 grid gap-2 sm:grid-cols-2">{data.foods.map((food) => <label key={food.id} className="flex items-center justify-between gap-3 rounded-xl bg-secondary/35 px-3 py-2.5 text-sm"><span className="min-w-0 truncate font-semibold">{food.name}</span><input data-testid={`input-stock-${food.id}`} type="number" min="0" step="0.1" value={data.inventory[food.id] ?? 0} onChange={(event) => onDataChange({ ...data, inventory: { ...data.inventory, [food.id]: Math.max(0, Number(event.target.value) || 0) } })} className="input w-24 py-2 text-right" /></label>)}</div></section>
+     <section className="mt-7 rounded-[24px] border border-border/70 bg-card/70 p-5 sm:p-6"><h2 className="font-display text-xl font-bold">Your data</h2><p className="mt-1 text-sm text-muted-foreground">Keep a copy, move devices, or start over.</p><div className="mt-5 grid gap-2 sm:grid-cols-3"><button data-testid="button-export-data" onClick={onExport} className="flex items-center justify-center gap-2 rounded-xl border border-border px-3 py-3 text-sm font-bold hover:bg-secondary/60"><Download size={16} />Export</button><button data-testid="button-import-data" onClick={onImport} className="flex items-center justify-center gap-2 rounded-xl border border-border px-3 py-3 text-sm font-bold hover:bg-secondary/60"><Upload size={16} />Import</button><button data-testid="button-clear-data" onClick={onClear} className="flex items-center justify-center gap-2 rounded-xl border border-destructive/30 px-3 py-3 text-sm font-bold text-destructive hover:bg-destructive/10"><Trash2 size={16} />Clear data</button></div></section>
     <p className="mt-7 flex items-center justify-center gap-2 text-center text-xs text-muted-foreground"><CircleHelp size={14} />FuelTrack is a private, offline food journal.</p>
   </div>;
 }

@@ -45,6 +45,7 @@ export type AppData = {
   foods: Food[];
   dailyLogs: Record<string, DailyLog>;
   purchases: Purchase[];
+  inventory: Record<string, number>;
   settings: Settings;
 };
 
@@ -83,6 +84,7 @@ const emptyData = (): AppData => ({
   foods: seedFoods.map((food) => ({ ...food })),
   dailyLogs: {},
   purchases: [],
+  inventory: {},
   settings: { proteinTarget: 80, monthlyBudget: 4000, darkMode: false },
 });
 
@@ -103,6 +105,7 @@ export function loadData(): AppData {
       foods: foods.length ? foods : fallback.foods,
       dailyLogs: logs,
       purchases,
+      inventory: isRecord(parsed.inventory) ? Object.fromEntries(Object.entries(parsed.inventory).map(([id, value]) => [id, Math.max(0, Number(value) || 0)])) : {},
       settings: {
         proteinTarget: Number(settings.proteinTarget) > 0 ? Number(settings.proteinTarget) : 80,
         monthlyBudget: Number(settings.monthlyBudget) >= 0 ? Number(settings.monthlyBudget) : 4000,
