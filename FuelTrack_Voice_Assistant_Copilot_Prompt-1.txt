@@ -1,0 +1,1709 @@
+FUELTRACK — FINAL VOICE ASSISTANT IMPLEMENTATION PROMPT
+
+You are working inside the existing FuelTrack repository.
+
+IMPORTANT:
+The previous Copilot implementation claimed to add conversational voice, but it did NOT actually work.
+
+Current problems I can reproduce:
+
+1. Saying "I bought 100 gm tofu" detects ADD_PURCHASE but only shows:
+   "A purchase needs a price before it can be saved."
+2. It does NOT ask:
+   "How much did you pay for the tofu?"
+3. It does NOT remember the incomplete purchase when I answer the follow-up.
+4. I have to manually tap "Tap to Speak" after opening the voice modal.
+5. Voice does not behave like a continuous conversation.
+6. There are duplicate/competing voice implementations in the codebase.
+
+I need you to FIX THE ACTUAL ARCHITECTURE, not just modify the UI or add more regex examples.
+
+==================================================
+1. AUDIT THE CURRENT CODE FIRST
+==================================================
+
+Before making changes, inspect the entire existing FuelTrack application.
+
+Especially inspect:
+
+- artifacts/fueltrack/src/App.tsx
+- artifacts/fueltrack/src/lib/voice-actions.ts
+- artifacts/fueltrack/src/lib/storage.ts
+- all food/meal/purchase types
+- all voice-related components
+- all speech recognition code
+- all speech synthesis code
+- all existing parser/action logic
+- all existing settings
+- all existing meal/purchase functions
+
+Search the entire repository for:
+
+- VoiceModal
+- UniversalVoiceModal
+- parseVoiceCommand
+- parseVoicePlan
+- SpeechRecognition
+- webkitSpeechRecognition
+- speechSynthesis
+- recognition.continuous
+- voice action types
+- voice session state
+
+Determine which voice implementation is actually being used.
+
+There must ultimately be ONE voice engine and ONE conversational voice UI.
+
+Remove obsolete/duplicate voice implementations instead of keeping multiple competing systems.
+
+DO NOT rebuild FuelTrack from scratch.
+
+Preserve all existing functionality.
+
+==================================================
+2. THE CORE REQUIREMENT
+==================================================
+
+FuelTrack must become a REAL conversational voice assistant.
+
+I should be able to speak naturally.
+
+Example:
+
+USER:
+"I bought 100 grams of tofu."
+
+FUELTRACK:
+"How much did you pay for the tofu?"
+
+USER:
+"65 rupees."
+
+FUELTRACK:
+"100 grams of tofu for ₹65. Save it?"
+
+USER:
+"Yes."
+
+FUELTRACK:
+"Saved."
+
+Then FuelTrack should remain ready for another voice command.
+
+There must be NO manual typing required.
+
+There must be NO need to restart the command.
+
+There must be NO need to press the microphone button between every sentence.
+
+==================================================
+3. IMPLEMENT A REAL CONVERSATIONAL STATE MACHINE
+==================================================
+
+The current behavior of creating:
+
+ADD_PURCHASE with price = 0
+
+and then throwing a validation error is WRONG.
+
+Never use fake defaults for required information.
+
+Instead implement persistent conversational state for the active voice session.
+
+Use an architecture equivalent to:
+
+VoiceSessionState:
+
+- idle
+- listening
+- processing
+- awaiting_clarification
+- awaiting_confirmation
+- executing
+- completed
+- error
+
+The session must remember:
+
+- current transcript
+- previous turns
+- pending intent
+- missing fields
+- assistant response
+- current context
+
+For example:
+
+pendingIntent = {
+    type: "ADD_PURCHASE",
+    food: tofu,
+    quantity: 100,
+    unit: "g",
+    price: undefined,
+    date: today,
+    missing: ["price"]
+}
+
+Then ask:
+
+"How much did you pay for the tofu?"
+
+When the user says:
+
+"65"
+
+DO NOT parse "65" as a completely new command.
+
+Recognize that the application is currently waiting for:
+
+price
+
+Then merge:
+
+price = 65
+
+into the existing pending intent.
+
+==================================================
+4. SLOT FILLING
+==================================================
+
+Implement generic slot filling.
+
+When an intent is incomplete:
+
+1. Determine required missing information.
+2. Ask the user for only the missing information.
+3. Store the pending intent.
+4. Automatically listen for the answer.
+5. Merge the answer into the pending intent.
+6. Continue until the intent is complete.
+7. Ask for confirmation if appropriate.
+8. Execute only after confirmation.
+
+Example:
+
+USER:
+"I bought tofu."
+
+ASSISTANT:
+"How much tofu did you buy?"
+
+USER:
+"200 grams."
+
+ASSISTANT:
+"How much did you pay?"
+
+USER:
+"65 rupees."
+
+ASSISTANT:
+"200 grams of tofu for ₹65. Save it?"
+
+USER:
+"Yes."
+
+SAVE.
+
+==================================================
+5. DO NOT ASK UNNECESSARY QUESTIONS
+==================================================
+
+If all required information is present:
+
+USER:
+"I bought 100g tofu for 65 rupees yesterday."
+
+FuelTrack should NOT ask:
+
+"How much did you buy?"
+
+or:
+
+"How much did it cost?"
+
+Everything is already known.
+
+Only ask:
+
+"100 grams of tofu for ₹65 yesterday. Save it?"
+
+==================================================
+6. MULTI-TURN CONTEXT IS MANDATORY
+==================================================
+
+This must work:
+
+USER:
+"I bought 100g tofu."
+
+ASSISTANT:
+"How much did you pay?"
+
+USER:
+"65."
+
+The system must understand that "65" means:
+
+price = 65
+
+because the active pending intent is ADD_PURCHASE.
+
+Similarly:
+
+USER:
+"I ate 3 dosa."
+
+ASSISTANT:
+"Was that breakfast, lunch, dinner, or a snack?"
+
+USER:
+"Breakfast."
+
+The system must merge:
+
+mealType = breakfast
+
+into the existing meal intent.
+
+Do NOT parse each sentence independently without context.
+
+==================================================
+7. GLOBAL VOICE BUTTON — ONE TAP
+==================================================
+
+Current behavior:
+
+Tap global microphone
+→ modal opens
+→ I must tap "Tap to Speak"
+
+THIS IS WRONG.
+
+Required:
+
+Tap global microphone
+→ modal opens
+→ microphone starts immediately
+→ UI says "Listening..."
+
+The original user gesture should be used to initiate speech recognition wherever browser permissions allow it.
+
+Do not wait for a React useEffect to perform the only microphone start.
+
+The modal microphone button should be used for:
+
+- stop
+- resume
+- retry
+
+It must NOT be required for the first voice interaction.
+
+==================================================
+8. CONTINUOUS CONVERSATION
+==================================================
+
+The current implementation uses:
+
+recognition.continuous = false
+
+Do not rely on a one-shot recognition lifecycle.
+
+Create a conversation controller.
+
+Required flow:
+
+LISTEN
+↓
+TRANSCRIBE
+↓
+UNDERSTAND
+↓
+RESPOND
+↓
+LISTEN AGAIN
+↓
+UNDERSTAND
+↓
+RESPOND
+↓
+LISTEN AGAIN
+↓
+...
+
+The session should remain active until:
+
+- user says "stop"
+- user says "exit"
+- user says "cancel"
+- user presses stop
+- user closes the assistant
+- unrecoverable microphone failure
+
+If speech recognition ends naturally because of silence or browser timeout, automatically restart it while the session remains active.
+
+Prevent restart loops when the user explicitly stops.
+
+==================================================
+9. FOLLOW-UP QUESTIONS MUST AUTOMATICALLY LISTEN
+==================================================
+
+This is critical.
+
+Example:
+
+FuelTrack:
+"How much did you pay for the tofu?"
+
+Then automatically:
+
+LISTENING...
+
+User:
+"65 rupees."
+
+No button.
+
+No tap.
+
+No typing.
+
+Then:
+
+FuelTrack:
+"100 grams of tofu for ₹65. Save it?"
+
+Then automatically:
+
+LISTENING...
+
+User:
+"Yes."
+
+Then save.
+
+This is the behavior I actually want.
+
+==================================================
+10. SPEAK THE FOLLOW-UP QUESTIONS
+==================================================
+
+Use speech synthesis where supported.
+
+If FuelTrack asks:
+
+"How much did you pay for the tofu?"
+
+It should speak that sentence.
+
+Then:
+
+- finish speaking
+- wait a short safety delay
+- start recognition
+- listen for the answer
+
+Prevent FuelTrack from hearing its own TTS response.
+
+Centralize speech output into one function such as:
+
+speak(text)
+
+Do not scatter speechSynthesis logic across components.
+
+==================================================
+11. VOICE SESSION UI
+==================================================
+
+Make the voice modal behave like a conversation.
+
+Example:
+
+FuelTrack
+
+Listening...
+
+YOU:
+"I bought 100g tofu."
+
+FUELTRACK:
+"How much did you pay for the tofu?"
+
+Listening...
+
+YOU:
+"65 rupees."
+
+FUELTRACK:
+"100g tofu for ₹65. Save it?"
+
+Listening...
+
+YOU:
+"Yes."
+
+FUELTRACK:
+"Saved."
+
+Listening...
+
+The UI should clearly show:
+
+- Ready
+- Listening...
+- Thinking...
+- Speaking...
+- Waiting for your answer...
+- Confirming...
+- Saved
+- Error
+
+Show recent conversation turns.
+
+The user should not need to look at the textarea.
+
+==================================================
+12. TEXT INPUT MUST USE THE SAME ENGINE
+==================================================
+
+The existing textarea should remain as a fallback.
+
+But typed input and voice input must use the EXACT SAME conversational engine.
+
+Architecture:
+
+TEXT/VOICE
+↓
+TRANSCRIPT
+↓
+CONVERSATIONAL NLU
+↓
+PENDING INTENT / ACTION PLAN
+↓
+CLARIFICATION
+↓
+CONFIRMATION
+↓
+DOMAIN SERVICE
+↓
+STORAGE
+↓
+RESPONSE
+
+Do not maintain separate logic for voice and typed commands.
+
+==================================================
+13. NATURAL LANGUAGE — NOT EXACT PHRASE MATCHING
+==================================================
+
+Do not create a giant list of hard-coded sentences.
+
+These should all work:
+
+"I bought tofu."
+
+"I got tofu."
+
+"I purchased tofu."
+
+"I bought 100g tofu."
+
+"I got 100 grams of tofu."
+
+"Bought 100 grams tofu today."
+
+"I purchased 100g tofu for 65 rupees."
+
+"I paid 65 for 100g tofu."
+
+"Tofu cost me 65 rupees."
+
+"I spent 65 rupees on tofu."
+
+Normalize speech recognition variations.
+
+Support:
+
+gram
+grams
+gm
+g
+
+kilogram
+kilograms
+kg
+kilo
+
+rupee
+rupees
+rs
+rs.
+INR
+₹
+
+dosa
+dosas
+
+egg
+eggs
+
+soya
+soy
+soy chunks
+soya chunks
+
+chapati
+chapathis
+
+curd
+yogurt
+
+==================================================
+14. PURCHASE INTENT
+==================================================
+
+Support:
+
+"I bought X."
+
+"I purchased X."
+
+"I got X."
+
+"I paid X for Y."
+
+"I bought X for ₹Y."
+
+"I bought X at ₹Y."
+
+"X cost me ₹Y."
+
+"I spent ₹Y on X."
+
+Extract:
+
+- food
+- quantity
+- unit
+- price
+- date
+- brand if provided
+
+Required purchase information must be validated.
+
+Never save a purchase with price = 0 just because price was omitted.
+
+If price is missing:
+
+ASK.
+
+If quantity is missing:
+
+ASK.
+
+If food is missing:
+
+ASK.
+
+==================================================
+15. MEAL INTENT
+==================================================
+
+Support multiple foods in one meal.
+
+Example:
+
+"I ate 3 dosa with 100 grams tofu and a glass of milk for breakfast."
+
+Create one meal:
+
+Breakfast:
+
+- 3 dosa
+- 100g tofu
+- 1 glass milk
+
+Also support:
+
+"I had 2 eggs and 3 chapati for dinner."
+
+"I ate rice with 50g soya for lunch."
+
+"I had curd and 3 dosa."
+
+"I ate 5 dosa with curd."
+
+If meal type is omitted, use a reasonable current-time inference if the existing application supports it.
+
+But allow correction.
+
+==================================================
+16. MULTIPLE ACTIONS IN ONE SENTENCE
+==================================================
+
+This must work:
+
+"I had 3 dosa and 100g tofu for breakfast, bought 1 litre milk for 22 rupees, and set my protein target to 100 grams."
+
+Detect:
+
+ADD_MEAL
+ADD_PURCHASE
+SET_PROTEIN_TARGET
+
+If one action is incomplete, preserve the other actions.
+
+Example:
+
+"I ate 3 dosa for breakfast and bought 100g tofu."
+
+FuelTrack should NOT reject the entire sentence.
+
+Instead:
+
+- meal is complete
+- purchase is missing price
+
+Ask:
+
+"How much did you pay for the tofu?"
+
+The completed meal can remain pending until the user confirms the complete action plan, depending on the existing UX.
+
+==================================================
+17. CONFIRMATION SYSTEM
+==================================================
+
+Recognize:
+
+yes
+yeah
+yep
+yup
+correct
+that's right
+save it
+do it
+go ahead
+okay
+ok
+sure
+
+As confirmation.
+
+Recognize:
+
+no
+nope
+cancel
+don't save
+forget it
+discard
+
+As cancellation.
+
+Also handle corrections.
+
+Example:
+
+FuelTrack:
+"100g tofu for ₹65. Save it?"
+
+User:
+"No, it was ₹70."
+
+Do NOT cancel.
+
+Update:
+
+price = 70
+
+Then:
+
+"Okay, 100g tofu for ₹70. Save it?"
+
+==================================================
+18. ACTION REGISTRY
+==================================================
+
+Expand the existing voice action architecture to support at minimum:
+
+ADD_MEAL
+EDIT_MEAL
+DELETE_MEAL
+
+ADD_PURCHASE
+EDIT_PURCHASE
+DELETE_PURCHASE
+
+CREATE_FOOD
+EDIT_FOOD
+DELETE_FOOD
+
+SET_PROTEIN_TARGET
+
+QUERY_PROTEIN
+QUERY_SPENDING
+QUERY_MEALS
+QUERY_HISTORY
+QUERY_FOOD
+
+GET_MEAL_SUGGESTION
+
+NAVIGATE
+SHOW_STATS
+
+CREATE_RECIPE
+EDIT_RECIPE
+DELETE_RECIPE
+
+CREATE_MEAL_TEMPLATE
+EDIT_MEAL_TEMPLATE
+DELETE_MEAL_TEMPLATE
+
+UNKNOWN
+
+The architecture must be extensible.
+
+==================================================
+19. VOICE QUERIES
+==================================================
+
+Support:
+
+"How much protein did I eat today?"
+
+"How much more protein do I need?"
+
+"How much did I spend today?"
+
+"How much did I spend on tofu this month?"
+
+"What did I eat yesterday?"
+
+"What did I have for breakfast yesterday?"
+
+"What foods do I have?"
+
+"What is my protein target?"
+
+The answers should be spoken and shown in the UI.
+
+==================================================
+20. CONTEXTUAL QUESTIONS
+==================================================
+
+Support follow-ups.
+
+Example:
+
+USER:
+"How much did I spend on tofu this month?"
+
+FUELTRACK:
+"You spent ₹260 on tofu this month."
+
+USER:
+"What about milk?"
+
+FuelTrack should understand that "milk" refers to the previous spending query.
+
+Another example:
+
+USER:
+"What did I eat yesterday?"
+
+FUELTRACK:
+"You had breakfast, lunch and dinner..."
+
+USER:
+"Only breakfast."
+
+FuelTrack understands the context and returns yesterday's breakfast.
+
+==================================================
+21. FOOD MATCHING
+==================================================
+
+Search in this order:
+
+1. exact built-in food
+2. aliases
+3. custom foods
+4. recipes
+5. meal templates
+6. normalized/fuzzy match
+7. clarification question
+
+Do not create duplicate foods when an existing food obviously matches.
+
+Handle aliases such as:
+
+soy
+soya
+soy chunks
+soya chunks
+
+==================================================
+22. UNKNOWN FOOD
+==================================================
+
+If the user says:
+
+"I ate 2 pieces of homemade paneer roll."
+
+and the food doesn't exist:
+
+Do not crash.
+
+Start a custom food clarification flow.
+
+For example:
+
+"I don't have paneer roll in your food database. Should I add it as a custom food?"
+
+If nutrition data is needed, ask for it conversationally.
+
+==================================================
+23. EDIT THROUGH VOICE
+==================================================
+
+Support:
+
+"Change my breakfast dosa from 3 to 4."
+
+"I actually ate 4 eggs, not 2."
+
+"Remove the tofu from breakfast."
+
+"Delete yesterday's dinner."
+
+"Change the tofu purchase price to 70."
+
+Use existing records.
+
+Do NOT create duplicate entries when the intent is clearly an edit.
+
+==================================================
+24. DELETE CONFIRMATION
+==================================================
+
+Destructive actions require confirmation.
+
+Example:
+
+User:
+"Delete yesterday's dinner."
+
+FuelTrack:
+"Delete yesterday's dinner containing 3 dosa and tofu?"
+
+User:
+"Yes."
+
+Then delete.
+
+==================================================
+25. PROTEIN TARGET
+==================================================
+
+Support:
+
+"Set my protein target to 100 grams."
+
+"Change my target to 90."
+
+"What's my protein target?"
+
+"How much protein do I need today?"
+
+==================================================
+26. MEAL SUGGESTIONS
+==================================================
+
+Support:
+
+"What should I eat?"
+
+"What should I eat for dinner?"
+
+"Give me something high in protein."
+
+"I need 30 grams more protein. What can I eat?"
+
+Use available information from the existing application:
+
+- protein target
+- protein consumed
+- remaining protein
+- inventory
+- food database
+- previous meals
+- meal type
+- approximate cost
+- variety
+
+==================================================
+27. RECIPES
+==================================================
+
+Implement voice support for recipes.
+
+Examples:
+
+"Create a recipe called tofu dosa."
+
+"The recipe uses 100g tofu and 3 dosa."
+
+"Add this recipe to dinner."
+
+"How much protein is in my tofu dosa?"
+
+Use the existing local-first architecture.
+
+==================================================
+28. MEAL TEMPLATES
+==================================================
+
+Support:
+
+"Create my normal breakfast."
+
+"My breakfast is 3 dosa, curd and 100g tofu."
+
+"Log my normal breakfast."
+
+Templates should expand into the correct meal items.
+
+==================================================
+29. WHAT SHOULD I EAT
+==================================================
+
+The meal suggestion engine should consider:
+
+- protein remaining
+- inventory
+- previous foods
+- meal type
+- nutrition
+- approximate cost
+- variety
+
+Do not simply return a random food.
+
+==================================================
+30. STORAGE SAFETY
+==================================================
+
+Voice parsing must NEVER directly mutate localStorage.
+
+Required architecture:
+
+Speech
+↓
+Transcript
+↓
+NLU
+↓
+Pending intent
+↓
+Validation
+↓
+Clarification
+↓
+Confirmation
+↓
+Domain action
+↓
+Storage
+↓
+UI update
+↓
+Voice response
+
+Only the application's domain/storage layer should mutate persistent data.
+
+==================================================
+31. NO FAKE DEFAULTS
+==================================================
+
+Do NOT silently use:
+
+price = 0
+quantity = 1
+protein = 0
+
+unless that value is actually valid according to the application's data model.
+
+If required information is missing, ASK.
+
+==================================================
+32. DO NOT THROW AWAY PARTIAL INFORMATION
+==================================================
+
+This is one of the most important requirements.
+
+If:
+
+"I bought 100g tofu."
+
+Then internally retain:
+
+food = tofu
+quantity = 100
+unit = g
+date = today
+price = undefined
+
+Then ask for price.
+
+When user says:
+
+"65"
+
+merge it into the pending purchase.
+
+DO NOT start over.
+
+==================================================
+33. TRUE VOICE-FIRST EXPERIENCE
+==================================================
+
+The voice assistant should feel like a conversational assistant, not a voice form.
+
+Desired:
+
+Tap microphone once
+↓
+Listening
+↓
+User speaks
+↓
+FuelTrack understands
+↓
+FuelTrack asks follow-up if needed
+↓
+Automatically listens
+↓
+User answers
+↓
+FuelTrack continues
+↓
+Confirmation
+↓
+User confirms
+↓
+Save
+↓
+"Saved."
+↓
+Continue listening
+
+No manual navigation.
+
+No manual form filling.
+
+No repeated microphone taps.
+
+==================================================
+34. BROWSER LIMITATIONS
+==================================================
+
+Do not fake impossible browser behavior.
+
+A normal web browser can restrict microphone access and speech recognition until permission/user interaction is granted.
+
+Therefore implement:
+
+FIRST USE:
+
+User taps global microphone.
+
+→ request microphone permission if needed
+→ start listening immediately after permission
+→ remember permission/browser state
+
+FUTURE USE:
+
+One tap should open the assistant and immediately start listening whenever the browser permits it.
+
+If automatic recognition is blocked, show a clear fallback:
+
+"Tap once to allow voice access."
+
+Do not claim that a normal GitHub Pages web app can guarantee a zero-touch wake word/background microphone on every browser.
+
+Architect the code so a future native Android version could add a true wake word separately.
+
+==================================================
+35. MOBILE-FIRST
+==================================================
+
+Test primarily for Android Chrome/mobile browsers.
+
+Do not assume desktop-only behavior.
+
+Make sure:
+
+- microphone button is reachable
+- modal fits mobile screen
+- transcript is readable
+- listening state is obvious
+- buttons are large enough
+- no accidental scrolling blocks interaction
+
+==================================================
+36. ERROR HANDLING
+==================================================
+
+Handle:
+
+- microphone permission denied
+- microphone unavailable
+- speech recognition unavailable
+- network speech recognition errors
+- recognition timeout
+- recognition ending unexpectedly
+- empty transcript
+- TTS unavailable
+- user cancellation
+- browser interruption
+
+Recover automatically where possible.
+
+Example:
+
+"I couldn't hear that. I'm listening again."
+
+Then restart recognition.
+
+Never crash the assistant.
+
+==================================================
+37. DUPLICATE VOICE CODE
+==================================================
+
+There are currently multiple voice implementations.
+
+Remove the obsolete implementation.
+
+There must be one source of truth for:
+
+- voice recognition
+- TTS
+- conversation state
+- parsing
+- clarification
+- confirmation
+- execution
+- session lifecycle
+
+Do not leave dead voice code behind.
+
+==================================================
+38. PRESERVE ALL EXISTING FEATURES
+==================================================
+
+Do not break:
+
+- Today
+- Stats
+- Purchases
+- Settings
+- food database
+- inventory
+- protein tracking
+- budget tracking
+- JSON export/import
+- PWA
+- dark mode
+- manual meal entry
+- manual purchase entry
+- editing
+- deleting
+- existing speech functionality
+
+Voice is an additional interface.
+
+==================================================
+39. TEST THE ACTUAL CONVERSATION ENGINE
+==================================================
+
+Add automated tests for:
+
+TEST 1:
+
+"I bought 100g tofu."
+
+Expected:
+
+pending ADD_PURCHASE
+missing price
+assistant asks price
+
+Then:
+
+"65 rupees."
+
+Expected:
+
+price = 65
+
+Then:
+
+"yes"
+
+Expected:
+
+purchase saved
+
+--------------------------------------------------
+
+TEST 2:
+
+"I bought tofu."
+
+Assistant asks quantity.
+
+"100 grams."
+
+Assistant asks price.
+
+"65."
+
+Assistant asks confirmation.
+
+"yes."
+
+Saved.
+
+--------------------------------------------------
+
+TEST 3:
+
+"I bought 100g tofu for 65 rupees yesterday."
+
+Only confirmation required.
+
+--------------------------------------------------
+
+TEST 4:
+
+"I ate 3 dosa with 100g tofu for breakfast."
+
+Expected:
+
+one breakfast meal
+3 dosa
+100g tofu
+
+--------------------------------------------------
+
+TEST 5:
+
+"I ate 3 dosa for breakfast and bought 100g tofu."
+
+Expected:
+
+meal recognized
+purchase recognized
+purchase remains pending price
+
+Assistant asks:
+
+"How much did you pay for the tofu?"
+
+--------------------------------------------------
+
+TEST 6:
+
+"Set my protein target to 100g."
+
+Expected:
+
+target updated.
+
+--------------------------------------------------
+
+TEST 7:
+
+"How much protein did I eat today?"
+
+Expected:
+
+correct query response.
+
+--------------------------------------------------
+
+TEST 8:
+
+"What should I eat for dinner?"
+
+Expected:
+
+meal suggestion.
+
+--------------------------------------------------
+
+TEST 9:
+
+"Delete yesterday's dinner."
+
+Expected:
+
+confirmation before deletion.
+
+--------------------------------------------------
+
+TEST 10:
+
+"I actually ate 4 dosa instead of 3."
+
+Expected:
+
+existing meal edited.
+
+--------------------------------------------------
+
+TEST 11:
+
+"No, it was 70 rupees."
+
+while waiting for confirmation of ₹65.
+
+Expected:
+
+price changed to ₹70,
+NOT cancelled.
+
+==================================================
+40. TEST THE REAL VOICE LIFECYCLE
+==================================================
+
+Do not test only parser functions.
+
+Test the complete flow:
+
+global microphone
+→ modal opens
+→ recognition starts
+→ transcript captured
+→ parser runs
+→ pending intent created
+→ clarification spoken
+→ recognition restarts
+→ second transcript captured
+→ pending intent updated
+→ confirmation spoken
+→ confirmation captured
+→ action executed
+→ result spoken
+→ session remains active
+
+If automated browser microphone testing is impossible, build a deterministic transcript-based harness that feeds transcripts into the EXACT SAME conversation engine.
+
+Do not create a fake alternate implementation just for tests.
+
+==================================================
+41. BUILD VALIDATION
+==================================================
+
+After implementation, run the project's actual checks.
+
+For example:
+
+pnpm typecheck
+
+pnpm build
+
+Use the repository's actual package scripts if those commands differ.
+
+Fix ALL errors.
+
+Do not leave:
+
+TODO
+FIXME
+placeholder
+temporary implementation
+not implemented
+disabled feature
+
+in the new voice architecture.
+
+==================================================
+42. VERIFY THE DEPLOYED APPLICATION
+==================================================
+
+After implementation:
+
+repository source
+→ production build
+→ GitHub Pages
+
+must contain the new implementation.
+
+Verify the actual deployed FuelTrack application.
+
+Do not tell me "done" based only on source edits.
+
+==================================================
+43. FINAL REAL-WORLD ACCEPTANCE TEST
+==================================================
+
+I will personally test this exact flow.
+
+STEP 1:
+
+I tap the GLOBAL FuelTrack microphone ONCE.
+
+It immediately enters:
+
+Listening...
+
+I say:
+
+"I bought 100 grams of tofu."
+
+FuelTrack automatically responds:
+
+"How much did you pay for the tofu?"
+
+STEP 2:
+
+Without touching anything:
+
+I say:
+
+"65 rupees."
+
+FuelTrack understands this as the missing price.
+
+STEP 3:
+
+FuelTrack says:
+
+"100 grams of tofu for ₹65. Save it?"
+
+STEP 4:
+
+Without touching anything:
+
+I say:
+
+"Yes."
+
+FuelTrack saves the purchase.
+
+STEP 5:
+
+FuelTrack says:
+
+"Saved."
+
+The voice session remains active.
+
+I then say:
+
+"I ate 3 dosa with 100 grams of tofu for breakfast."
+
+FuelTrack processes it without requiring another microphone tap.
+
+==================================================
+44. SECOND ACCEPTANCE TEST
+==================================================
+
+I open the voice assistant.
+
+I say:
+
+"I bought tofu."
+
+FuelTrack asks:
+
+"How much tofu did you buy?"
+
+I say:
+
+"200 grams."
+
+FuelTrack asks:
+
+"How much did you pay?"
+
+I say:
+
+"65."
+
+FuelTrack asks:
+
+"200 grams of tofu for ₹65. Save it?"
+
+I say:
+
+"Yes."
+
+It saves.
+
+==================================================
+45. THIRD ACCEPTANCE TEST
+==================================================
+
+I say:
+
+"I ate 3 dosa."
+
+FuelTrack asks:
+
+"Was that breakfast, lunch, dinner, or a snack?"
+
+I say:
+
+"Breakfast."
+
+FuelTrack remembers the previous turn and logs breakfast.
+
+==================================================
+46. FOURTH ACCEPTANCE TEST
+==================================================
+
+I say:
+
+"I had 3 dosa for breakfast and bought 100 grams of tofu."
+
+FuelTrack must NOT fail because the purchase is incomplete.
+
+It should understand:
+
+ADD_MEAL = complete
+ADD_PURCHASE = missing price
+
+Then ask:
+
+"How much did you pay for the tofu?"
+
+==================================================
+47. MOST IMPORTANT DIFFERENCE
+==================================================
+
+CURRENT:
+
+voice input
+→ parse
+→ incomplete action
+→ validation error
+→ user manually fixes it
+
+REQUIRED:
+
+voice input
+→ understand intent
+→ detect missing information
+→ store pending intent
+→ ask follow-up
+→ automatically listen
+→ understand answer IN CONTEXT
+→ merge answer
+→ ask confirmation
+→ execute
+→ speak result
+→ continue listening
+
+Implement the REQUIRED architecture.
+
+==================================================
+48. DO NOT JUST MODIFY THE SCREENSHOT/UI
+==================================================
+
+The screenshot shows the symptom.
+
+The actual problem is the underlying voice/conversation architecture.
+
+Do not simply change:
+
+"A purchase needs a price before it can be saved."
+
+into:
+
+"How much did you pay?"
+
+unless you ALSO implement the state required to receive and process the answer.
+
+The following must all work together:
+
+- speech recognition lifecycle
+- conversational state
+- pending intents
+- slot filling
+- natural language understanding
+- follow-up questions
+- contextual answers
+- confirmation
+- action execution
+- storage
+- TTS
+- automatic re-listening
+
+==================================================
+49. DO NOT STOP AFTER THE FIRST SUCCESSFUL COMMAND
+==================================================
+
+The feature is NOT complete if this works:
+
+"I ate 3 dosa."
+
+but this fails:
+
+"I bought tofu."
+
+followed by:
+
+"65 rupees."
+
+The entire multi-turn conversation must work.
+
+==================================================
+50. FINAL REQUIREMENT
+==================================================
+
+Actually modify the repository.
+
+Do not only describe the solution.
+
+Do not give me a plan instead of implementation.
+
+Do not claim completion until:
+
+1. The duplicate voice implementations are resolved.
+2. A real conversational state machine exists.
+3. Pending intents survive across turns.
+4. Missing information triggers follow-up questions.
+5. Follow-up answers are interpreted in context.
+6. Voice automatically starts after the global microphone is pressed.
+7. Voice automatically resumes after FuelTrack speaks.
+8. Confirmation works through voice.
+9. Multiple actions work.
+10. Purchases work.
+11. Meals work.
+12. Queries work.
+13. Edits work.
+14. Deletes work with confirmation.
+15. Custom foods work.
+16. Recipes work.
+17. Meal templates work.
+18. Protein target works.
+19. Protein gap suggestions work.
+20. Spending queries work.
+21. Meal suggestions work.
+22. TypeScript passes.
+23. Production build passes.
+24. The deployed application contains the changes.
+
+The final experience must feel like:
+
+"Talk to FuelTrack and it takes care of the rest."
+
+Not:
+
+"Fill out a voice form one command at a time."
