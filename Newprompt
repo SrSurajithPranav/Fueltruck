@@ -1,0 +1,969 @@
+FUELTRACK — SECOND PASS / ACTUALLY FINISH THE VOICE ASSISTANT
+
+You just implemented a conversational voice architecture, but the implementation is NOT finished.
+
+I inspected your changes and there are still critical problems.
+
+DO NOT respond with another plan.
+
+DO NOT tell me it is complete.
+
+Actually inspect the code you just changed, fix the remaining problems, run the tests/build, and verify the real behavior.
+
+==================================================
+1. CRITICAL CURRENT PROBLEM
+==================================================
+
+Your current ConversationVoiceModal still contains:
+
+startListening()
+
+and the microphone only starts from:
+
+onClick={listening ? stop : startListening}
+
+That means the user STILL has to press the microphone inside the modal.
+
+That violates the requirement.
+
+Required:
+
+GLOBAL MIC BUTTON
+↓
+VOICE MODAL OPENS
+↓
+LISTENING STARTS AUTOMATICALLY
+↓
+USER SPEAKS
+
+There must NOT be:
+
+GLOBAL MIC
+↓
+MODAL
+↓
+"Tap to Speak"
+↓
+SECOND TAP
+
+The global microphone click must be the user gesture that initiates the first recognition session.
+
+Trace the actual caller of the modal in App.tsx.
+
+Fix the flow at the source.
+
+Do not merely hide the "Tap to speak" text.
+
+==================================================
+2. FIX THE GLOBAL VOICE FLOW
+==================================================
+
+Find the code that currently does something like:
+
+setVoiceOpen(true)
+
+when the global microphone is clicked.
+
+The voice system must be designed so the initial user gesture is connected to the voice-start operation wherever browser APIs permit it.
+
+If React state updates make it impossible to synchronously start recognition from the original click, restructure the voice controller appropriately.
+
+The desired user experience is:
+
+USER TAPS GLOBAL MIC
+
+Immediately:
+
+Voice modal opens
++
+recognition starts
++
+UI becomes:
+
+Listening...
+
+Do not require another tap.
+
+For browsers that genuinely prevent automatic recognition, implement the smallest possible permission fallback.
+
+Do not pretend browser restrictions don't exist.
+
+==================================================
+3. FIX CONTINUOUS CONVERSATION
+==================================================
+
+Your current code contains:
+
+recognition.continuous = true
+
+but:
+
+recognition.onend = () => setListening(false)
+
+This is NOT sufficient.
+
+When recognition ends naturally while the voice session is still active, the assistant must restart recognition automatically.
+
+Required lifecycle:
+
+LISTENING
+↓
+speech ends
+↓
+process final transcript
+↓
+assistant determines response
+↓
+if response needs to be spoken:
+    SPEAK
+↓
+TTS finishes
+↓
+small delay
+↓
+START LISTENING AGAIN
+
+The session remains active.
+
+Only stop when:
+
+- user explicitly says stop
+- user explicitly says exit
+- user explicitly cancels
+- user presses stop
+- modal closes
+- unrecoverable error
+
+Implement a ref such as:
+
+shouldKeepListeningRef
+
+or an equivalent robust mechanism.
+
+Do not create restart loops after explicit stop.
+
+==================================================
+4. FIX SPEECH RECOGNITION RESULT HANDLING
+==================================================
+
+Your current implementation does:
+
+Array.from(event.results)
+  .map(...)
+  .join(' ')
+
+and then calls:
+
+parse(finalValue)
+
+for every onresult event.
+
+This is dangerous.
+
+It can repeatedly process the same transcript and create duplicate actions.
+
+Implement proper handling of:
+
+- interim results
+- final results
+- recognition result indexes
+- already-processed final results
+
+Only send NEW final speech to the conversational engine.
+
+For example:
+
+User says:
+
+"I bought 100 grams of tofu."
+
+The engine should receive that utterance ONCE.
+
+Not:
+
+"I bought"
+then:
+
+"I bought 100 grams"
+then:
+
+"I bought 100 grams of tofu"
+then:
+
+"I bought 100 grams of tofu I bought 100 grams of tofu"
+
+Avoid duplicate execution.
+
+==================================================
+5. SEPARATE TRANSCRIPT FROM CONVERSATIONAL INPUT
+==================================================
+
+Do not use the visible textarea state as the source of truth for the conversation.
+
+There must be separate concepts:
+
+- current displayed transcript
+- current user utterance
+- conversation history
+- pending intent
+- assistant response
+- session state
+
+Voice input should send a single utterance into the conversation engine.
+
+Typed input should also send a single utterance into the same engine.
+
+==================================================
+6. FIX THE PENDING INTENT ARCHITECTURE
+==================================================
+
+The whole purpose of the change is that incomplete actions survive between turns.
+
+This MUST work:
+
+USER:
+
+"I bought 100 grams of tofu."
+
+Internal state:
+
+{
+  type: "ADD_PURCHASE",
+  food: tofu,
+  quantity: 100,
+  unit: "g",
+  price: undefined,
+  date: today,
+  missing: ["price"]
+}
+
+Assistant:
+
+"How much did you pay for the tofu?"
+
+Then automatically listen.
+
+USER:
+
+"65 rupees."
+
+The second utterance MUST NOT be sent through the normal independent-command path.
+
+Because:
+
+session.pendingIntent.type === "ADD_PURCHASE"
+
+and:
+
+missing === ["price"]
+
+the conversation engine must interpret:
+
+65 rupees
+
+as:
+
+price = 65
+
+Then:
+
+missing = []
+
+Then create the confirmation.
+
+==================================================
+7. NEVER REPARSE THE ORIGINAL COMMAND TO RECOVER STATE
+==================================================
+
+I noticed your current code has logic similar to:
+
+session.pendingIntent
+    ? parseVoicePlan(session.pendingIntent.source, data)
+    : null
+
+Do NOT use reparsing of the original source as the primary way to reconstruct a pending intent.
+
+The pending intent itself must be the authoritative structured state.
+
+If the pending intent already contains:
+
+food
+quantity
+unit
+price
+date
+missing
+
+use those values directly.
+
+Do not throw them away and regenerate them from text.
+
+==================================================
+8. GENERIC SLOT FILLING
+==================================================
+
+Implement a generic mechanism.
+
+For example:
+
+pendingIntent = {
+  type: "ADD_PURCHASE",
+  fields: {
+    food: tofu,
+    quantity: 100,
+    unit: "g",
+    price: undefined
+  },
+  missing: ["price"]
+}
+
+The next utterance:
+
+"65"
+
+should fill the missing price.
+
+Similarly:
+
+"I ate 3 dosa."
+
+could produce:
+
+{
+  type: "ADD_MEAL",
+  items: [3 dosa],
+  mealType: undefined,
+  missing: ["mealType"]
+}
+
+Then:
+
+"Breakfast"
+
+fills:
+
+mealType = breakfast.
+
+Do not hard-code only the tofu/price example.
+
+==================================================
+9. CONFIRMATION MUST ALSO BE CONTEXTUAL
+==================================================
+
+When:
+
+pendingIntent.status === "awaiting_confirmation"
+
+and user says:
+
+"yes"
+
+execute the pending intent.
+
+When user says:
+
+"no"
+
+cancel it.
+
+But handle corrections:
+
+Assistant:
+
+"100g tofu for ₹65. Save it?"
+
+User:
+
+"No, it was ₹70."
+
+Expected:
+
+price = 70
+
+Then:
+
+"Okay, 100g tofu for ₹70. Save it?"
+
+Do not interpret every "no" as cancellation if the user also supplied corrected information.
+
+==================================================
+10. AUTOMATIC LISTENING AFTER ASSISTANT RESPONSE
+==================================================
+
+This is mandatory.
+
+Example:
+
+USER:
+
+"I bought 100g tofu."
+
+ASSISTANT:
+
+"How much did you pay for the tofu?"
+
+Then:
+
+SPEAKING
+↓
+TTS FINISHES
+↓
+WAIT ~300–700ms
+↓
+LISTENING
+
+No user interaction.
+
+Then:
+
+USER:
+
+"65 rupees."
+
+Again:
+
+SPEAKING
+
+"100 grams of tofu for ₹65. Save it?"
+
+Then automatically:
+
+LISTENING
+
+USER:
+
+"Yes."
+
+Then:
+
+SAVED
+
+And automatically:
+
+LISTENING
+
+for the next command.
+
+==================================================
+11. DO NOT USE continuous=true AS THE ONLY SOLUTION
+==================================================
+
+Browser speech recognition can end even when:
+
+continuous = true
+
+Therefore implement an explicit session controller.
+
+Something conceptually like:
+
+startSession()
+stopSession()
+startListening()
+stopListening()
+handleFinalUtterance()
+handleAssistantResponse()
+scheduleRestart()
+cancelRestart()
+
+The implementation can differ, but the lifecycle must be deterministic.
+
+==================================================
+12. PREVENT MULTIPLE RECOGNITION INSTANCES
+==================================================
+
+Before starting recognition:
+
+- stop any existing recognition instance
+- ensure there is only one active recognition instance
+- guard against duplicate start() calls
+- handle InvalidStateError
+- maintain a session ID/token if necessary
+
+Example failure to prevent:
+
+startListening()
+startListening()
+startListening()
+
+creating multiple recognizers.
+
+There must be exactly one active recognizer per voice session.
+
+==================================================
+13. STOP MUST REALLY STOP EVERYTHING
+==================================================
+
+When the user presses stop:
+
+- set shouldKeepListening = false
+- cancel pending restart timers
+- stop recognition
+- cancel or finish speech appropriately
+- do not automatically restart
+- update UI to Ready/Stopped
+
+When the user closes the modal:
+
+- stop recognition
+- cancel timers
+- clean up TTS if appropriate
+- clear session resources
+
+When a new modal opens:
+
+- create a fresh session
+
+==================================================
+14. FIX THE UI
+==================================================
+
+Do NOT make "Tap to Speak" the main instruction.
+
+The initial state after opening should be:
+
+Listening...
+
+The microphone button should primarily mean:
+
+- stop while listening
+- start/resume after stopping
+
+Example:
+
+LISTENING:
+large microphone with stop behavior
+
+STOPPED:
+large microphone with resume behavior
+
+Do not require the user to discover a second hidden step.
+
+==================================================
+15. REMOVE THE TEXTAREA FROM THE PRIMARY FLOW
+==================================================
+
+Keep typed input as a fallback.
+
+But the normal voice interaction should not depend on it.
+
+The user should be able to complete:
+
+"I bought 100 grams of tofu."
+→ "65 rupees."
+→ "Yes."
+
+without ever interacting with the textarea.
+
+==================================================
+16. TEST EXACTLY THIS FLOW
+==================================================
+
+Do not only unit-test the parser.
+
+Create a deterministic conversational test harness around the actual conversation engine.
+
+Test:
+
+input:
+"I bought 100 grams of tofu."
+
+expected:
+assistant asks for price
+
+input:
+"65 rupees."
+
+expected:
+pending price becomes 65
+
+input:
+"yes"
+
+expected:
+purchase action executes
+
+Then verify the stored purchase contains:
+
+food = tofu
+quantity = 100
+unit = g
+price = 65
+
+==================================================
+17. TEST THE MEAL FLOW
+==================================================
+
+Input:
+
+"I ate 3 dosa."
+
+Expected:
+
+assistant asks:
+
+"Was that breakfast, lunch, dinner, or a snack?"
+
+Then:
+
+"Breakfast."
+
+Expected:
+
+existing pending meal receives:
+
+mealType = breakfast
+
+Then confirmation.
+
+Then save.
+
+==================================================
+18. TEST MULTIPLE ACTIONS
+==================================================
+
+Input:
+
+"I ate 3 dosa for breakfast and bought 100 grams of tofu."
+
+Expected:
+
+ADD_MEAL is complete.
+
+ADD_PURCHASE is incomplete.
+
+Assistant asks:
+
+"How much did you pay for the tofu?"
+
+Then:
+
+"65."
+
+The purchase receives price 65.
+
+The meal information must NOT disappear.
+
+==================================================
+19. TEST COMPLETE PURCHASE
+==================================================
+
+Input:
+
+"I bought 100 grams of tofu for 65 rupees yesterday."
+
+Expected:
+
+NO clarification questions.
+
+Only:
+
+"100 grams of tofu for ₹65 yesterday. Save it?"
+
+Then:
+
+"Yes."
+
+Save.
+
+==================================================
+20. TEST DUPLICATE-PROCESSING PROTECTION
+==================================================
+
+Ensure one utterance produces one logical processing event.
+
+This:
+
+"I bought 100 grams of tofu."
+
+must NOT result in:
+
+- multiple pending purchases
+- multiple confirmation messages
+- multiple storage records
+
+Test recognition events with interim + final results.
+
+==================================================
+21. TEST QUERY CONTEXT
+==================================================
+
+Input:
+
+"How much did I spend on tofu this month?"
+
+Assistant answers.
+
+Then:
+
+"What about milk?"
+
+Expected:
+
+milk should inherit the previous spending-query context.
+
+Do not treat it as UNKNOWN.
+
+==================================================
+22. TEST EDIT CONTEXT
+==================================================
+
+If a meal exists:
+
+"I ate 3 dosa for breakfast."
+
+Then:
+
+"I actually ate 4."
+
+Expected:
+
+modify the existing meal rather than create a second meal.
+
+==================================================
+23. TEST DELETE CONFIRMATION
+==================================================
+
+User:
+
+"Delete yesterday's dinner."
+
+Assistant asks for confirmation.
+
+User:
+
+"Yes."
+
+Delete.
+
+User:
+
+"No."
+
+Do not delete.
+
+==================================================
+24. SPEECH SYNTHESIS
+==================================================
+
+Centralize TTS.
+
+The flow should be:
+
+assistant response generated
+↓
+display response
+↓
+speak response
+↓
+wait until speech completes
+↓
+restart listening
+
+Do not start recognition while FuelTrack is still speaking.
+
+Handle browsers where speech synthesis events behave unexpectedly.
+
+If TTS is unavailable, the conversation should still continue using visible text.
+
+==================================================
+25. ERROR RECOVERY
+==================================================
+
+Handle:
+
+- permission denied
+- recognition unavailable
+- microphone busy
+- network speech recognition failure
+- recognition ended unexpectedly
+- empty transcript
+- TTS failure
+- repeated start errors
+
+Do not destroy the pending intent because of a temporary microphone failure.
+
+For example:
+
+pending purchase:
+
+100g tofu
+missing price
+
+If microphone fails, the pending purchase must remain intact.
+
+==================================================
+26. DO NOT BREAK MANUAL INPUT
+==================================================
+
+The existing manual meal/purchase UI must continue working.
+
+Typed voice-assistant input should also go through the same conversation engine.
+
+Manual forms should continue using the existing domain/storage functions.
+
+==================================================
+27. REMOVE DEAD / DUPLICATE VOICE CODE
+==================================================
+
+Search again for:
+
+VoiceModal
+UniversalVoiceModal
+ConversationVoiceModal
+parseVoiceCommand
+parseVoicePlan
+SpeechRecognition
+webkitSpeechRecognition
+speechSynthesis
+
+There must be one active conversational voice architecture.
+
+Remove obsolete implementations and unused imports/types where appropriate.
+
+Do not leave two systems capable of handling the same voice command.
+
+==================================================
+28. IMPORTANT: DO NOT OVERWRITE WORKING FEATURES
+==================================================
+
+Do not rewrite unrelated FuelTrack functionality.
+
+Do not remove:
+
+- Today
+- Stats
+- Purchases
+- Settings
+- food database
+- inventory
+- protein tracking
+- spending
+- JSON import/export
+- PWA
+- manual entry
+- existing UI
+
+Only change what is required.
+
+==================================================
+29. RUN ACTUAL CHECKS
+==================================================
+
+Run the project's real checks.
+
+At minimum, determine and run the correct commands for:
+
+- typecheck
+- build
+- tests
+
+Do not only run typecheck.
+
+If there are no tests, add the necessary conversation-engine tests.
+
+Fix every error.
+
+==================================================
+30. VERIFY PRODUCTION BUILD
+==================================================
+
+Build the actual FuelTrack production application.
+
+Verify the built application uses the new voice implementation.
+
+Do not assume source changes automatically mean the deployed application changed.
+
+==================================================
+31. FINAL ACCEPTANCE TEST
+==================================================
+
+Before saying DONE, simulate this exact conversation using the real conversation engine:
+
+START
+
+User taps global microphone once.
+
+Expected immediately:
+
+Listening...
+
+User:
+
+"I bought 100 grams of tofu."
+
+FuelTrack:
+
+"How much did you pay for the tofu?"
+
+Automatically listening again.
+
+User:
+
+"65 rupees."
+
+FuelTrack:
+
+"100 grams of tofu for ₹65. Save it?"
+
+Automatically listening again.
+
+User:
+
+"Yes."
+
+FuelTrack:
+
+"Saved."
+
+Automatically listening again.
+
+User:
+
+"I ate 3 dosa with 100 grams of tofu for breakfast."
+
+FuelTrack processes the meal without another microphone tap.
+
+This is the minimum acceptance requirement.
+
+==================================================
+32. FINAL REPORT
+==================================================
+
+Only after actually implementing and testing, report:
+
+VOICE ENGINE
+✓ one voice architecture
+✓ pending intent state
+✓ slot filling
+✓ contextual follow-ups
+✓ automatic first listening
+✓ automatic re-listening
+✓ TTS → listening lifecycle
+✓ confirmation
+✓ cancellation
+✓ corrections
+✓ multi-action commands
+✓ purchase flow
+✓ meal flow
+✓ query context
+✓ edit
+✓ delete confirmation
+✓ duplicate recognition protection
+
+VALIDATION
+✓ typecheck
+✓ tests
+✓ production build
+
+DEPLOYMENT
+✓ production build contains changes
+
+If any item genuinely cannot be completed because of a browser restriction, explain the exact restriction and implement the best possible fallback.
+
+DO NOT mark the feature complete merely because the code compiles.
+
+The actual acceptance criterion is:
+
+ONE TAP → TALK → FUELTRACK RESPONDS → AUTOMATICALLY LISTENS → TALK AGAIN → CONFIRMS → SAVES → CONTINUES LISTENING.
+
+That complete loop must work.
