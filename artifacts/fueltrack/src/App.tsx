@@ -156,7 +156,7 @@ function FuelTrackApp() {
       try {
         const parsed = JSON.parse(String(reader.result)) as Partial<AppData>;
         if (!Array.isArray(parsed.foods) || !parsed.dailyLogs || !Array.isArray(parsed.purchases) || !parsed.settings) throw new Error('Invalid');
-        const imported: AppData = { foods: parsed.foods, dailyLogs: parsed.dailyLogs, purchases: parsed.purchases, inventory: parsed.inventory ?? {}, settings: { proteinTarget: Number(parsed.settings.proteinTarget) || 80, monthlyBudget: Number(parsed.settings.monthlyBudget) || 4000, darkMode: parsed.settings.darkMode === true } };
+        const imported: AppData = { foods: parsed.foods, dailyLogs: parsed.dailyLogs, purchases: parsed.purchases, inventory: parsed.inventory ?? {}, settings: { proteinTarget: Number(parsed.settings.proteinTarget) || 80, monthlyBudget: Number(parsed.settings.monthlyBudget) || 4000, darkMode: parsed.settings.darkMode === true, spokenResponses: parsed.settings.spokenResponses !== false } };
         updateData(imported, 'Backup restored');
         setModal(null);
       } catch { notify('That file is not a FuelTrack backup', 'warn'); }
@@ -166,7 +166,7 @@ function FuelTrackApp() {
 
   return (
     <div className="min-h-[100dvh] bg-background text-foreground">
-      <Shell page={page} navigate={navigate}>
+      <Shell page={page} navigate={navigate} onVoice={() => setModal('voice')}>
         {page === 'today' && (
           <TodayPage
             data={data}
@@ -206,7 +206,14 @@ function FuelTrackApp() {
       {modal === 'voice' && <UniversalVoiceModal data={data} initialPlan={voiceCommand} onClose={closeModal} onPlanChange={setVoiceCommand} onSubmit={(plan) => {
         try {
           const result = applyVoicePlan(plan, data);
-          updateData(result.data, [...result.messages, ...result.queryResults].join(' · ') || 'Voice action complete');
+          const response = [...result.messages, ...result.queryResults].join(' · ') || 'Voice action complete';
+          updateData(result.data, response);
+          const destination = plan.actions.find((action) => action.type === 'NAVIGATE');
+          if (destination?.type === 'NAVIGATE') setLocation(destination.page === 'today' ? '/' : `/${destination.page}`);
+          if (data.settings.spokenResponses && 'speechSynthesis' in window) {
+            window.speechSynthesis.cancel();
+            window.speechSynthesis.speak(new SpeechSynthesisUtterance(response));
+          }
           closeModal();
         } catch (error) {
           notify(error instanceof Error ? error.message : 'That action needs more detail', 'warn');
@@ -227,7 +234,7 @@ function FuelTrackApp() {
           <p className="text-sm leading-6 text-muted-foreground">This removes food logs, purchases, and your food library from this browser. It cannot be undone.</p>
           <div className="mt-6 flex gap-3">
             <button data-testid="button-cancel-clear" className="flex-1 rounded-2xl border border-border px-4 py-3 font-semibold" onClick={closeModal}>Keep data</button>
-            <button data-testid="button-confirm-clear" className="flex-1 rounded-2xl bg-destructive px-4 py-3 font-semibold text-destructive-foreground" onClick={() => { updateData({ foods: [], dailyLogs: {}, purchases: [], inventory: {}, settings: { proteinTarget: 80, monthlyBudget: 4000, darkMode: data.settings.darkMode } }); closeModal(); notify('Data cleared'); }}>Clear data</button>
+            <button data-testid="button-confirm-clear" className="flex-1 rounded-2xl bg-destructive px-4 py-3 font-semibold text-destructive-foreground" onClick={() => { updateData({ foods: [], dailyLogs: {}, purchases: [], inventory: {}, settings: { proteinTarget: 80, monthlyBudget: 4000, darkMode: data.settings.darkMode, spokenResponses: data.settings.spokenResponses } }); closeModal(); notify('Data cleared'); }}>Clear data</button>
           </div>
         </Modal>
       )}
@@ -236,7 +243,7 @@ function FuelTrackApp() {
   );
 }
 
-function Shell({ page, navigate, children }: { page: Page; navigate: (page: Page) => void; children: ReactNode }) {
+function Shell({ page, navigate, onVoice, children }: { page: Page; navigate: (page: Page) => void; onVoice: () => void; children: ReactNode }) {
   const items: { page: Page; label: string; icon: typeof Flame }[] = [
     { page: 'today', label: 'Today', icon: Flame },
     { page: 'stats', label: 'Stats', icon: TrendingUp },
@@ -250,6 +257,7 @@ function Shell({ page, navigate, children }: { page: Page; navigate: (page: Page
           <span className="grid h-10 w-10 place-items-center rounded-[14px] bg-primary text-primary-foreground shadow-sm"><Flame size={21} strokeWidth={2.4} /></span>
           <span><span className="block font-display text-xl font-bold tracking-tight">FuelTrack</span><span className="text-[10px] font-semibold uppercase tracking-[.18em] text-muted-foreground">eat with intent</span></span>
         </button>
+        <button data-testid="button-global-voice" aria-label="Tell FuelTrack what happened" title="Tell FuelTrack what happened" onClick={onVoice} className="mb-8 flex w-full items-center gap-3 rounded-2xl border border-primary/25 bg-primary/10 px-3.5 py-3 text-left text-sm font-bold text-primary transition hover:bg-primary/15"><span className="grid h-9 w-9 place-items-center rounded-xl bg-primary text-primary-foreground"><Mic size={18} /></span><span>Tell FuelTrack</span></button>
         <nav className="space-y-2">
           {items.map(({ page: itemPage, label, icon: Icon }) => <NavItem key={itemPage} active={page === itemPage} label={label} icon={<Icon size={18} />} onClick={() => navigate(itemPage)} />)}
         </nav>
@@ -265,7 +273,7 @@ function Shell({ page, navigate, children }: { page: Page; navigate: (page: Page
             <span className="grid h-8 w-8 place-items-center rounded-[11px] bg-primary text-primary-foreground"><Flame size={17} /></span>
             <span className="font-display text-lg font-bold">FuelTrack</span>
           </button>
-          <span className="text-xs font-semibold uppercase tracking-widest text-muted-foreground">local only</span>
+          <button data-testid="button-global-voice-mobile" aria-label="Tell FuelTrack what happened" title="Tell FuelTrack what happened" onClick={onVoice} className="grid h-10 w-10 place-items-center rounded-full bg-primary text-primary-foreground shadow-sm"><Mic size={18} /></button>
         </header>
         <div className="mx-auto max-w-[980px] px-5 py-7 sm:px-8 md:px-12 md:py-10">{children}</div>
       </main>
@@ -508,6 +516,7 @@ function SettingsPage({ data, onDataChange, onEditFood, onAddFood, onDeleteFood,
   return <div className="animate-rise"><PageHeading eyebrow="Your rhythm, your rules" title="Settings" />
     <form onSubmit={saveSettings} className="rounded-[24px] border border-border/70 bg-card/70 p-5 sm:p-6"><div className="mb-5 flex items-center justify-between"><div><h2 className="font-display text-xl font-bold">Daily preferences</h2><p className="mt-1 text-sm text-muted-foreground">Small numbers that keep the ritual useful.</p></div><SettingsIcon size={21} className="text-primary" /></div><div className="grid gap-4 sm:grid-cols-2"><Field label="Protein target" hint="grams per day"><div className="relative"><input data-testid="input-protein-target" type="number" min="1" step="0.5" value={target} onChange={(e) => setTarget(e.target.value)} className="input pr-12" /><span className="input-suffix">g</span></div></Field><Field label="Monthly food budget" hint="your planned ceiling"><div className="relative"><span className="input-prefix">₹</span><input data-testid="input-monthly-budget" type="number" min="0" step="50" value={budget} onChange={(e) => setBudget(e.target.value)} className="input pl-8" /></div></Field></div><button data-testid="button-save-settings" type="submit" className="mt-5 rounded-xl bg-primary px-4 py-2.5 text-sm font-bold text-primary-foreground">Save preferences</button></form>
     <section className="mt-7 rounded-[24px] border border-border/70 bg-card/70 p-5 sm:p-6"><div className="flex items-center justify-between"><div><h2 className="font-display text-xl font-bold">Appearance</h2><p className="mt-1 text-sm text-muted-foreground">{data.settings.darkMode ? 'A softer evening palette.' : 'A warm, daylight palette.'}</p></div><button data-testid="button-toggle-dark-mode" onClick={toggleDark} className={`relative h-8 w-14 rounded-full p-1 transition ${data.settings.darkMode ? 'bg-primary' : 'bg-secondary'}`} aria-label="Toggle dark mode"><span className={`block h-6 w-6 rounded-full bg-card shadow-sm transition-transform ${data.settings.darkMode ? 'translate-x-6' : ''}`}>{data.settings.darkMode ? <Moon size={13} className="mx-auto mt-1.5 text-primary" /> : <Sun size={13} className="mx-auto mt-1.5 text-accent" />}</span></button></div></section>
+    <section className="mt-7 rounded-[24px] border border-border/70 bg-card/70 p-5 sm:p-6"><div className="flex items-center justify-between gap-4"><div><h2 className="font-display text-xl font-bold">Spoken responses</h2><p className="mt-1 text-sm text-muted-foreground">Read voice confirmations aloud when your browser supports it.</p></div><input data-testid="input-spoken-responses" type="checkbox" checked={data.settings.spokenResponses} onChange={(event) => onDataChange({ ...data, settings: { ...data.settings, spokenResponses: event.target.checked } }, event.target.checked ? 'Spoken responses on' : 'Spoken responses off')} className="h-5 w-5 accent-[hsl(var(--primary))]" /></div></section>
     <section className="mt-7"><div className="mb-3 flex items-end justify-between"><div><p className="text-[11px] font-bold uppercase tracking-widest text-primary">Reference shelf</p><h2 className="mt-1 font-display text-2xl font-bold">Food database</h2></div><button data-testid="button-add-food-setting" onClick={onAddFood} className="flex items-center gap-1.5 text-sm font-bold text-primary"><Plus size={16} />Add food</button></div><div className="overflow-hidden rounded-2xl border border-border/70 bg-card/70">{data.foods.map((food) => <div key={food.id} data-testid={`row-food-${food.id}`} className="flex items-center justify-between gap-3 border-b border-border/50 px-4 py-3.5 last:border-0"><div className="min-w-0"><p className="truncate text-sm font-semibold">{food.name}</p><p className="mt-0.5 text-xs text-muted-foreground">{food.servingLabel} · {food.proteinOptional ? 'protein optional' : `${quantityText(food.proteinPerServing)} g protein`} · {food.manualCost ? 'manual cost' : `${currency(food.defaultPrice)} / ${food.priceUnit}`}</p></div><div className="flex shrink-0 gap-1"><IconButton label={`Edit ${food.name}`} onClick={() => onEditFood(food)}><Edit3 size={15} /></IconButton><IconButton label={`Delete ${food.name}`} onClick={() => onDeleteFood(food.id)}><Trash2 size={15} /></IconButton></div></div>)}</div></section>
      <section className="mt-7 rounded-[24px] border border-border/70 bg-card/70 p-5 sm:p-6"><div className="flex items-start justify-between gap-3"><div><p className="text-[11px] font-bold uppercase tracking-widest text-primary">Worth knowing</p><h2 className="mt-1 font-display text-xl font-bold">Pantry stock</h2><p className="mt-1 text-sm text-muted-foreground">Track what is already at home. Purchases add to stock automatically.</p></div><PackageOpen size={21} className="text-primary" /></div><div className="mt-5 grid gap-2 sm:grid-cols-2">{data.foods.map((food) => <label key={food.id} className="flex items-center justify-between gap-3 rounded-xl bg-secondary/35 px-3 py-2.5 text-sm"><span className="min-w-0 truncate font-semibold">{food.name}</span><input data-testid={`input-stock-${food.id}`} type="number" min="0" step="0.1" value={data.inventory[food.id] ?? 0} onChange={(event) => onDataChange({ ...data, inventory: { ...data.inventory, [food.id]: Math.max(0, Number(event.target.value) || 0) } })} className="input w-24 py-2 text-right" /></label>)}</div></section>
      <section className="mt-7 rounded-[24px] border border-border/70 bg-card/70 p-5 sm:p-6"><h2 className="font-display text-xl font-bold">Your data</h2><p className="mt-1 text-sm text-muted-foreground">Keep a copy, move devices, or start over.</p><div className="mt-5 grid gap-2 sm:grid-cols-3"><button data-testid="button-export-data" onClick={onExport} className="flex items-center justify-center gap-2 rounded-xl border border-border px-3 py-3 text-sm font-bold hover:bg-secondary/60"><Download size={16} />Export</button><button data-testid="button-import-data" onClick={onImport} className="flex items-center justify-center gap-2 rounded-xl border border-border px-3 py-3 text-sm font-bold hover:bg-secondary/60"><Upload size={16} />Import</button><button data-testid="button-clear-data" onClick={onClear} className="flex items-center justify-center gap-2 rounded-xl border border-destructive/30 px-3 py-3 text-sm font-bold text-destructive hover:bg-destructive/10"><Trash2 size={16} />Clear data</button></div></section>

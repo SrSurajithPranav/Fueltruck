@@ -1,5 +1,6 @@
 const CACHE = 'fueltrack-shell-v1';
-const SHELL = ['/', '/manifest.webmanifest', '/favicon.svg'];
+const BASE_PATH = new URL(self.registration.scope).pathname;
+const SHELL = [BASE_PATH, `${BASE_PATH}manifest.webmanifest`, `${BASE_PATH}favicon.svg`];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(SHELL)));
@@ -17,6 +18,6 @@ self.addEventListener('fetch', (event) => {
       const copy = response.clone();
       caches.open(CACHE).then((cache) => cache.put(event.request, copy));
       return response;
-    }).catch(() => caches.match('/')))
+    }).catch(() => caches.match(BASE_PATH)))
   );
 });

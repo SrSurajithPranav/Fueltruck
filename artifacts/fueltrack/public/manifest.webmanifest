@@ -2,13 +2,13 @@
   "name": "FuelTrack",
   "short_name": "FuelTrack",
   "description": "A quiet daily ritual for food, protein, and spending.",
-  "start_url": "/",
+  "start_url": "./",
   "display": "standalone",
   "background_color": "#f8f4eb",
   "theme_color": "#2d6a5b",
   "icons": [
     {
-      "src": "/favicon.svg",
+      "src": "./favicon.svg",
       "sizes": "any",
       "type": "image/svg+xml",
       "purpose": "any maskable"

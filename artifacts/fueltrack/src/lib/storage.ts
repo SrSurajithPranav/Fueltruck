@@ -40,7 +40,7 @@ export type Purchase = {
   brand: string;
   price: number;
 };
-export type Settings = { proteinTarget: number; monthlyBudget: number; darkMode: boolean };
+export type Settings = { proteinTarget: number; monthlyBudget: number; darkMode: boolean; spokenResponses: boolean };
 export type AppData = {
   foods: Food[];
   dailyLogs: Record<string, DailyLog>;
@@ -85,7 +85,7 @@ const emptyData = (): AppData => ({
   dailyLogs: {},
   purchases: [],
   inventory: {},
-  settings: { proteinTarget: 80, monthlyBudget: 4000, darkMode: false },
+  settings: { proteinTarget: 80, monthlyBudget: 4000, darkMode: false, spokenResponses: true },
 });
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null;
@@ -110,6 +110,7 @@ export function loadData(): AppData {
         proteinTarget: Number(settings.proteinTarget) > 0 ? Number(settings.proteinTarget) : 80,
         monthlyBudget: Number(settings.monthlyBudget) >= 0 ? Number(settings.monthlyBudget) : 4000,
         darkMode: settings.darkMode === true,
+        spokenResponses: settings.spokenResponses !== false,
       },
     };
   } catch {

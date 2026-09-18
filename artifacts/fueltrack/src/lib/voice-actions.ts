@@ -16,10 +16,12 @@ export type VoiceAction =
   | { type: 'SET_PROTEIN_TARGET'; target: number }
   | { type: 'QUERY_PROTEIN'; date: string }
   | { type: 'QUERY_SPENDING'; food: Food | null; month: string }
+  | { type: 'QUERY_MEALS'; date: string }
   | { type: 'GET_MEAL_SUGGESTION'; meal: Meal }
-  | { type: 'CREATE_FOOD'; food: Food };
+  | { type: 'CREATE_FOOD'; food: Food }
+  | { type: 'NAVIGATE'; page: 'today' | 'stats' | 'purchases' | 'settings' };
 
-export type VoicePlan = { transcript: string; actions: VoiceAction[]; clarification?: string };
+export type VoicePlan = { transcript: string; actions: VoiceAction[]; clarification?: string; followUp?: string };
 
 const meals: Meal[] = ['Breakfast', 'Lunch', 'Evening', 'Dinner', 'Snack', 'Other'];
 
@@ -28,7 +30,9 @@ function normalise(value: string) {
 }
 
 function dateFor(text: string) {
-  return /\byesterday\b/.test(text) ? shiftIso(todayIso(), -1) : todayIso();
+  if (/\byesterday|last night|last evening\b/.test(text)) return shiftIso(todayIso(), -1);
+  if (/\btomorrow\b/.test(text)) return shiftIso(todayIso(), 1);
+  return todayIso();
 }
 
 function mealFor(text: string): Meal {
@@ -42,15 +46,27 @@ function mealFor(text: string): Meal {
 }
 
 function findFood(text: string, foods: Food[]) {
+  const aliases = text.replace(/soya chunks?/g, 'soya').replace(/soy chunks?/g, 'soya');
   return foods
     .flatMap((food) => food.name.split('/').map((term) => ({ food, term: term.trim().toLowerCase() })))
     .sort((a, b) => b.term.length - a.term.length)
-    .find(({ term }) => term.length > 1 && text.includes(term))?.food ?? null;
+    .find(({ term }) => term.length > 1 && aliases.includes(term))?.food ?? null;
+}
+
+const numberWords: Record<string, number> = { a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, half: 0.5 };
+
+function numberFor(value: string) {
+  return numberWords[value] ?? Number(value);
 }
 
 function quantityFor(text: string) {
-  const match = text.match(/^(\d+(?:\.\d+)?)\s*(?:grams?|g|kg|pieces?|eggs?|litres?|l|ml)?\s*/);
-  return match ? Math.max(0.01, Number(match[1])) : 1;
+  const match = text.match(/^(\d+(?:\.\d+)?|a|an|one|two|three|four|five|six|seven|eight|nine|ten|half)\s*(?:grams?|g|kg|pieces?|eggs?|litres?|l|ml|cups?|servings?|bowls?|plates?|packets?)?\s*/);
+  if (!match) return 1;
+  const value = numberFor(match[1]);
+  const unit = match[0].toLowerCase();
+  if (unit.includes('kg')) return value * 1000;
+  if (unit.includes('litre') || /\bl\b/.test(unit)) return value * 1000;
+  return Math.max(0.01, value);
 }
 
 function customFood(name: string): Food {
@@ -61,9 +77,9 @@ function customFood(name: string): Food {
 function parseMeal(text: string, data: AppData): VoiceAction | null {
   const body = text.replace(/^.*?\b(ate|eat|had|have|consumed|finished)\b/, '').split(/\b(?:and\s+)?(?:bought|buy|purchased|purchase|got)\b/)[0].replace(/\bfor\s+(breakfast|lunch|evening|dinner|snack)\b/g, '').trim();
   if (!body) return null;
-  const items = body.split(/\s*(?:with|and|,|\+)\s*/).map((part) => part.trim()).filter(Boolean).map((part) => {
+  const items = body.split(/\s*(?:with|and|,|\+)\s+(?=(?:\d|a\b|an\b|one\b|two\b|three\b|four\b|five\b|six\b|seven\b|eight\b|nine\b|ten\b|half\b))/).map((part) => part.trim()).filter(Boolean).map((part) => {
     const quantity = quantityFor(part);
-    const named = part.replace(/^\d+(?:\.\d+)?\s*(?:grams?|g|kg|pieces?|eggs?|litres?|l|ml)?\s*/, '').trim();
+    const named = part.replace(/^(?:\d+(?:\.\d+)?|a|an|one|two|three|four|five|six|seven|eight|nine|ten|half)\s*(?:grams?|g|kg|pieces?|eggs?|litres?|l|ml|cups?|servings?|bowls?|plates?|packets?)?\s*/, '').trim();
     return { food: findFood(named, data.foods) ?? customFood(named), quantity };
   });
   return items.length ? { type: 'ADD_MEAL', date: dateFor(text), meal: mealFor(text), items } : null;
@@ -73,6 +89,8 @@ export function parseVoicePlan(transcript: string, data: AppData): VoicePlan {
   const text = normalise(transcript);
   if (!text) return { transcript, actions: [], clarification: 'Tell FuelTrack what you ate, bought, or want to know.' };
   const actions: VoiceAction[] = [];
+  const navigation = text.match(/\b(?:open|show|go to|navigate to)\s+(today|stats|purchases|settings)\b/);
+  if (navigation) actions.push({ type: 'NAVIGATE', page: navigation[1] as VoiceAction & never });
   const target = text.match(/(?:set|change) (?:my )?protein target to (\d+(?:\.\d+)?)\s*(?:g|grams?)?/);
   if (target) actions.push({ type: 'SET_PROTEIN_TARGET', target: Math.max(1, Number(target[1])) });
   const foodDefinition = text.match(/(?:add|create)\s+(.+?)\s+to my food database.*?(\d+(?:\.\d+)?)\s*(?:g|grams?)\s*protein.*?(?:costs?|price)\s*(?:rs\.?|inr|rupees?)?\s*(\d+(?:\.\d+)?)/);
@@ -83,6 +101,8 @@ export function parseVoicePlan(transcript: string, data: AppData): VoicePlan {
   if (/how much protein/.test(text)) actions.push({ type: 'QUERY_PROTEIN', date: dateFor(text) });
   const spending = text.match(/how much (?:did i spend|have i spent) on (.+?)(?: this month| this week|$)/);
   if (spending) actions.push({ type: 'QUERY_SPENDING', food: findFood(spending[1], data.foods), month: todayIso().slice(0, 7) });
+  if (/how much (?:did i spend|have i spent) (?:this month|this week)/.test(text)) actions.push({ type: 'QUERY_SPENDING', food: null, month: todayIso().slice(0, 7) });
+  if (/what did i eat|show me everything i ate|show my meals/.test(text)) actions.push({ type: 'QUERY_MEALS', date: dateFor(text) });
   if (/what should i eat|good dinner|meal suggestion/.test(text)) actions.push({ type: 'GET_MEAL_SUGGESTION', meal: mealFor(text) });
   const purchase = text.match(/\b(bought|buy|purchased|purchase|got)\b(.+)/);
   if (purchase) {
@@ -96,7 +116,7 @@ export function parseVoicePlan(transcript: string, data: AppData): VoicePlan {
     if (meal) actions.push(meal);
   }
   const missingPrice = actions.some((action) => action.type === 'ADD_PURCHASE' && action.price === 0);
-  return { transcript, actions, clarification: missingPrice ? 'What price did you pay for that purchase?' : actions.length ? undefined : 'I could not find an action in that sentence.' };
+  return { transcript, actions, clarification: missingPrice ? 'What price did you pay for that purchase?' : actions.length ? undefined : 'I could not find an action in that sentence.', followUp: missingPrice ? 'price' : undefined };
 }
 
 export function validateVoicePlan(plan: VoicePlan) {
@@ -118,7 +138,8 @@ export function applyVoicePlan(plan: VoicePlan, source: AppData): VoiceResult {
   for (const action of plan.actions) {
     if (action.type === 'SET_PROTEIN_TARGET') { data.settings.proteinTarget = action.target; messages.push(`Protein target set to ${action.target} g`); continue; }
     if (action.type === 'QUERY_PROTEIN') { const grams = data.dailyLogs[action.date]?.entries.reduce((sum, entry) => sum + entry.protein, 0) ?? 0; queryResults.push(`${grams} g protein on ${action.date}`); continue; }
-    if (action.type === 'QUERY_SPENDING') { const total = data.purchases.filter((item) => item.date.startsWith(action.month) && (!action.food || item.foodId === action.food.id || item.foodNameSnapshot.toLowerCase() === action.food.name.toLowerCase())).reduce((sum, item) => sum + item.price, 0); queryResults.push(`${total} spent this month`); continue; }
+    if (action.type === 'QUERY_SPENDING') { const total = data.purchases.filter((item) => item.date.startsWith(action.month) && (!action.food || item.foodId === action.food.id || item.foodNameSnapshot.toLowerCase() === action.food.name.toLowerCase())).reduce((sum, item) => sum + item.price, 0); queryResults.push(`${total} spent${action.food ? ` on ${action.food.name}` : ''} this month`); continue; }
+    if (action.type === 'QUERY_MEALS') { const entries = data.dailyLogs[action.date]?.entries ?? []; queryResults.push(entries.length ? `${entries.map((entry) => `${entry.quantity} ${entry.foodNameSnapshot}`).join(', ')} on ${action.date}` : `Nothing logged on ${action.date}`); continue; }
     if (action.type === 'GET_MEAL_SUGGESTION') { const remaining = Math.max(0, data.settings.proteinTarget - (data.dailyLogs[todayIso()]?.entries.reduce((sum, entry) => sum + entry.protein, 0) ?? 0)); const candidate = [...data.foods].filter((food) => food.proteinPerServing > 0).sort((a, b) => Math.abs(a.proteinPerServing - remaining) - Math.abs(b.proteinPerServing - remaining))[0]; queryResults.push(candidate ? `Try ${candidate.name}: about ${candidate.proteinPerServing} g protein for ${action.meal.toLowerCase()} (you need about ${remaining} g).` : `You need about ${remaining} g protein today.`); continue; }
     if (action.type === 'CREATE_FOOD') { ensureFood(action.food); messages.push(`${action.food.name} added to your food database`); continue; }
     if (action.type === 'ADD_MEAL') {
